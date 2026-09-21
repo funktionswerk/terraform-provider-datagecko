@@ -1,0 +1,13 @@
+# Build artifacts
+/terraform-provider-datagecko
+*.exe
+
+# Go
+/vendor/
+
+# IDE
+.idea/
+*.iml
+
+# Superpowers subagent-driven-development scratch workspace
+/.superpowers/sdd/
