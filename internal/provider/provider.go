@@ -84,7 +84,9 @@ func (p *DatageckoProvider) Configure(ctx context.Context, req provider.Configur
 }
 
 func (p *DatageckoProvider) Resources(ctx context.Context) []func() resource.Resource {
-	return nil
+	return []func() resource.Resource{
+		NewStreamResource,
+	}
 }
 
 func (p *DatageckoProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
