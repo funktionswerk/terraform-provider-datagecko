@@ -11,3 +11,6 @@
 
 # Superpowers subagent-driven-development scratch workspace
 /.superpowers/sdd/
+
+# Local git worktrees used during implementation
+/.worktrees/
