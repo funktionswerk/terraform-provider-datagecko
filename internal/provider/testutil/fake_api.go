@@ -30,11 +30,12 @@ type fakeKey struct {
 type FakeAPI struct {
 	Server *httptest.Server
 
-	mu        sync.Mutex
-	streams   map[string]*fakeStream
-	keys      map[string]*fakeKey
-	nextID    int
-	rateLimit int
+	mu               sync.Mutex
+	streams          map[string]*fakeStream
+	keys             map[string]*fakeKey
+	nextID           int
+	rateLimit        int
+	requiredAdminKey string
 }
 
 func NewFakeAPI() *FakeAPI {
@@ -69,6 +70,16 @@ func (f *FakeAPI) ClearAllSeries() {
 	for _, s := range f.streams {
 		s.Series = nil
 	}
+}
+
+// RequireAdminKey makes the fake reject any request whose Authorization
+// header isn't exactly "Bearer <key>" — for testing that the client
+// authenticates. Unset (the default) accepts any credential, which is what
+// every other test in this module relies on.
+func (f *FakeAPI) RequireAdminKey(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requiredAdminKey = key
 }
 
 // Revoke marks a key revoked directly, bypassing DELETE — simulates it
@@ -111,7 +122,13 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "slow down")
 		return
 	}
+	requiredAdminKey := f.requiredAdminKey
 	f.mu.Unlock()
+
+	if requiredAdminKey != "" && r.Header.Get("Authorization") != "Bearer "+requiredAdminKey {
+		writeError(w, http.StatusUnauthorized, "invalid_key", "invalid API key")
+		return
+	}
 
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	segments := strings.Split(path, "/")

@@ -71,7 +71,7 @@ func TestConfigureFallsBackToTheEnvVar(t *testing.T) {
 }
 
 func TestConfigureFailsWithoutAnAdminKeyAnywhere(t *testing.T) {
-	resp := configureWith(t, "", "", nil)
+	resp := configureWith(t, "", "", map[string]string{"DATAGECKO_ADMIN_KEY": ""})
 
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("expected a diagnostic error when no admin key is configured")

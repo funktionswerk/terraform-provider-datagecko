@@ -146,6 +146,11 @@ func (r *SeriesResource) Update(ctx context.Context, req resource.UpdateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	var state seriesModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	name := plan.Name.ValueString()
 	unit := plan.Unit.ValueString()
@@ -159,7 +164,9 @@ func (r *SeriesResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.Set(ctx, toSeriesModel(plan.StreamID.ValueString(), series))...)
+	model := toSeriesModel(plan.StreamID.ValueString(), series)
+	model.LastPointAt = state.LastPointAt
+	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
 func (r *SeriesResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

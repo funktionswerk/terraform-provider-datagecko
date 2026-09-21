@@ -84,7 +84,11 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body, out inte
 		if wait < 0 {
 			wait = 0
 		}
-		time.Sleep(time.Duration(wait) * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(wait) * time.Second):
+		}
 		return c.doOnce(ctx, method, path, body, out, true)
 	}
 

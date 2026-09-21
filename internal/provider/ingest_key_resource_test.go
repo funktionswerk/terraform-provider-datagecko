@@ -60,6 +60,12 @@ resource "datagecko_ingest_key" "feed" {
 				),
 			},
 			{
+				ResourceName:            "datagecko_ingest_key.feed",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"secret"},
+			},
+			{
 				// Revoked outside Terraform: expect a non-empty plan (recreate).
 				// PlanOnly: applying this step's plan would silently
 				// reconcile (recreate) the resource, leaving the next

@@ -85,6 +85,25 @@ func TestClientGivesUpAfterOneRetry(t *testing.T) {
 	}
 }
 
+func TestClientAuthenticatesWithTheAdminKey(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	fake.RequireAdminKey("correct-key")
+	ctx := context.Background()
+
+	wrong := NewClient(fake.Server.URL, "wrong-key", nil)
+	_, err := wrong.ListStreams(ctx)
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "invalid_key" {
+		t.Fatalf("expected a 401 invalid_key APIError, got %v", err)
+	}
+
+	right := NewClient(fake.Server.URL, "correct-key", nil)
+	if _, err := right.ListStreams(ctx); err != nil {
+		t.Fatalf("expected the correct key to succeed, got %v", err)
+	}
+}
+
 func TestSeriesAndKeyLifecycleAgainstTheFake(t *testing.T) {
 	fake := testutil.NewFakeAPI()
 	defer fake.Close()
