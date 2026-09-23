@@ -27,8 +27,6 @@ internal/provider/
 examples/                         # provider + one example per resource
 ```
 
-Design doc: `docs/superpowers/specs/2026-09-21-terraform-provider-datagecko-design.md`.
-
 Every HTTP call to datagecko goes through `internal/provider/client.go` — no resource file builds a request by hand, the same "one wrapper" rule `datagecko.ai`'s own `integrations/` packages follow.
 
 ## Git commits

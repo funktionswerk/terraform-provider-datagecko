@@ -22,8 +22,3 @@ With a dev override active, `terraform init` is skipped for this provider — ju
 ## Usage
 
 See `examples/`. Set `DATAGECKO_ADMIN_KEY` or pass `admin_key` in the `provider` block — either way, one provider instance (or one `alias`) manages exactly one organization, because an admin key *is* an organization's credential.
-
-## Design and implementation plan
-
-- `docs/superpowers/specs/2026-09-21-terraform-provider-datagecko-design.md`
-- `docs/superpowers/plans/2026-09-21-terraform-provider-datagecko.md`
