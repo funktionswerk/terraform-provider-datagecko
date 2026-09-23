@@ -6,9 +6,12 @@ import (
 	"regexp"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -35,6 +38,7 @@ type streamModel struct {
 	ID          types.String `tfsdk:"id"`
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
+	Tags        types.Map    `tfsdk:"tags"`
 	FirstSeen   types.String `tfsdk:"first_seen"`
 }
 
@@ -53,7 +57,7 @@ func (r *StreamResource) Schema(ctx context.Context, req resource.SchemaRequest,
 			},
 			"name": schema.StringAttribute{
 				Required:    true,
-				Description: "Unique within the organization. Must match ^[a-z][a-z0-9_.]{0,127}$.",
+				Description: "Unique within the organization, together with its tags. Must match ^[a-z][a-z0-9_.]{0,127}$.",
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(streamNamePattern, "must match ^[a-z][a-z0-9_.]{0,127}$"),
 				},
@@ -62,6 +66,13 @@ func (r *StreamResource) Schema(ctx context.Context, req resource.SchemaRequest,
 				Optional: true,
 				Computed: true,
 				Default:  stringdefault.StaticString(""),
+			},
+			"tags": schema.MapAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Computed:    true,
+				Default:     mapdefault.StaticValue(types.MapValueMust(types.StringType, map[string]attr.Value{})),
+				Description: "key:value pairs. Together with name, this is the stream's identity — the same name with a different tag set is a different stream. Updated in place.",
 			},
 			"first_seen": schema.StringAttribute{
 				Computed:      true,
@@ -91,11 +102,17 @@ func (r *StreamResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	stream, err := r.client.CreateStream(ctx, plan.Name.ValueString(), plan.Description.ValueString())
+	var tags map[string]string
+	resp.Diagnostics.Append(plan.Tags.ElementsAs(ctx, &tags, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	stream, err := r.client.CreateStream(ctx, plan.Name.ValueString(), plan.Description.ValueString(), tags)
 	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
 		resp.Diagnostics.AddError(
 			"Stream already exists",
-			fmt.Sprintf("A stream named %q already exists in this organization. Import it instead: terraform import <this resource's address> <id>.", plan.Name.ValueString()),
+			fmt.Sprintf("A stream named %q with these tags already exists in this organization. Import it instead: terraform import <this resource's address> <id>.", plan.Name.ValueString()),
 		)
 		return
 	}
@@ -104,7 +121,12 @@ func (r *StreamResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.Set(ctx, toStreamModel(stream))...)
+	model, diags := toStreamModel(ctx, stream)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
 func (r *StreamResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -124,7 +146,12 @@ func (r *StreamResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.Set(ctx, toStreamModel(stream))...)
+	model, diags := toStreamModel(ctx, stream)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
 func (r *StreamResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -134,11 +161,17 @@ func (r *StreamResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
+	var tags map[string]string
+	resp.Diagnostics.Append(plan.Tags.ElementsAs(ctx, &tags, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	name := plan.Name.ValueString()
 	description := plan.Description.ValueString()
-	stream, err := r.client.UpdateStream(ctx, plan.ID.ValueString(), &name, &description)
+	stream, err := r.client.UpdateStream(ctx, plan.ID.ValueString(), &name, &description, tags)
 	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Stream already exists", fmt.Sprintf("A stream named %q already exists in this organization.", name))
+		resp.Diagnostics.AddError("Stream already exists", fmt.Sprintf("A stream named %q with these tags already exists in this organization.", name))
 		return
 	}
 	if err != nil {
@@ -146,7 +179,12 @@ func (r *StreamResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.Set(ctx, toStreamModel(stream))...)
+	model, diags := toStreamModel(ctx, stream)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
 func (r *StreamResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -169,11 +207,13 @@ func (r *StreamResource) ImportState(ctx context.Context, req resource.ImportSta
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-func toStreamModel(s *Stream) streamModel {
+func toStreamModel(ctx context.Context, s *Stream) (streamModel, diag.Diagnostics) {
+	tags, diags := types.MapValueFrom(ctx, types.StringType, s.Tags)
 	return streamModel{
 		ID:          types.StringValue(s.ID),
 		Name:        types.StringValue(s.Name),
 		Description: types.StringValue(s.Description),
+		Tags:        tags,
 		FirstSeen:   types.StringValue(s.FirstSeen),
-	}
+	}, diags
 }

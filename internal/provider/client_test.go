@@ -14,7 +14,7 @@ func TestClientCreatesAndListsAStream(t *testing.T) {
 	client := NewClient(fake.Server.URL, "test-admin-key", nil)
 	ctx := context.Background()
 
-	created, err := client.CreateStream(ctx, "revenue", "Daily revenue")
+	created, err := client.CreateStream(ctx, "revenue", "Daily revenue", nil)
 	if err != nil {
 		t.Fatalf("CreateStream: %v", err)
 	}
@@ -33,15 +33,78 @@ func TestCreateStreamAlreadyExists(t *testing.T) {
 	defer fake.Close()
 	client := NewClient(fake.Server.URL, "test", nil)
 	ctx := context.Background()
-	if _, err := client.CreateStream(ctx, "revenue", ""); err != nil {
+	if _, err := client.CreateStream(ctx, "revenue", "", nil); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
-	_, err := client.CreateStream(ctx, "revenue", "")
+	_, err := client.CreateStream(ctx, "revenue", "", nil)
 
 	apiErr, ok := err.(*APIError)
 	if !ok || !apiErr.IsAlreadyExists() {
 		t.Fatalf("expected an already-exists APIError, got %v", err)
+	}
+}
+
+func TestCreateStreamSameNameDifferentTagsIsNotAConflict(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+
+	online, err := client.CreateStream(ctx, "acme.com", "", map[string]string{"sales_channel": "online"})
+	if err != nil {
+		t.Fatalf("online create: %v", err)
+	}
+	offline, err := client.CreateStream(ctx, "acme.com", "", map[string]string{"sales_channel": "offline"})
+	if err != nil {
+		t.Fatalf("offline create: %v", err)
+	}
+
+	if online.ID == offline.ID {
+		t.Fatal("expected two distinct streams, got the same id")
+	}
+	if online.Tags["sales_channel"] != "online" || offline.Tags["sales_channel"] != "offline" {
+		t.Fatalf("expected each stream to keep its own tags, got %+v and %+v", online.Tags, offline.Tags)
+	}
+}
+
+func TestCreateStreamSameNameAndTagsIsAConflict(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	tags := map[string]string{"sales_channel": "online"}
+	if _, err := client.CreateStream(ctx, "acme.com", "", tags); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	_, err := client.CreateStream(ctx, "acme.com", "", tags)
+
+	apiErr, ok := err.(*APIError)
+	if !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected an already-exists APIError, got %v", err)
+	}
+}
+
+func TestUpdateStreamCanRetagInPlace(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, err := client.CreateStream(ctx, "acme.com", "", map[string]string{"sales_channel": "online"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	name := "acme.com"
+	description := ""
+	updated, err := client.UpdateStream(ctx, stream.ID, &name, &description, map[string]string{"sales_channel": "offline"})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	if updated.Tags["sales_channel"] != "offline" {
+		t.Fatalf("expected the tag to change, got %+v", updated.Tags)
 	}
 }
 
@@ -64,7 +127,7 @@ func TestClientRetriesOnceOn429(t *testing.T) {
 	fake.RateLimitNextRequests(1)
 	client := NewClient(fake.Server.URL, "test", nil)
 
-	_, err := client.CreateStream(context.Background(), "revenue", "")
+	_, err := client.CreateStream(context.Background(), "revenue", "", nil)
 
 	if err != nil {
 		t.Fatalf("expected the retry to succeed, got %v", err)
@@ -77,7 +140,7 @@ func TestClientGivesUpAfterOneRetry(t *testing.T) {
 	fake.RateLimitNextRequests(2)
 	client := NewClient(fake.Server.URL, "test", nil)
 
-	_, err := client.CreateStream(context.Background(), "revenue", "")
+	_, err := client.CreateStream(context.Background(), "revenue", "", nil)
 
 	apiErr, ok := err.(*APIError)
 	if !ok || apiErr.StatusCode != http.StatusTooManyRequests {
@@ -110,7 +173,7 @@ func TestSeriesAndKeyLifecycleAgainstTheFake(t *testing.T) {
 	client := NewClient(fake.Server.URL, "test", nil)
 	ctx := context.Background()
 
-	stream, _ := client.CreateStream(ctx, "revenue", "")
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
 	series, err := client.CreateSeries(ctx, stream.ID, "delivery", "USD")
 	if err != nil {
 		t.Fatalf("CreateSeries: %v", err)

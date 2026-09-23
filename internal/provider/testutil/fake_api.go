@@ -18,7 +18,22 @@ type fakeSeries struct {
 
 type fakeStream struct {
 	ID, Name, Description, FirstSeen string
+	Tags                             map[string]string
 	Series                           []*fakeSeries
+}
+
+// tagsEqual reports whether two tag sets carry the same pairs, regardless of
+// how each map was built — the same equality the real API's tag_digest gives.
+func tagsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 type fakeKey struct {
@@ -169,8 +184,12 @@ func (f *FakeAPI) streamJSON(s *fakeStream) map[string]interface{} {
 	for i, sr := range s.Series {
 		series[i] = map[string]interface{}{"id": sr.ID, "name": sr.Name, "unit": sr.Unit, "last_point_at": nil}
 	}
+	tags := s.Tags
+	if tags == nil {
+		tags = map[string]string{}
+	}
 	return map[string]interface{}{
-		"id": s.ID, "name": s.Name, "description": s.Description,
+		"id": s.ID, "name": s.Name, "description": s.Description, "tags": tags,
 		"first_seen": s.FirstSeen, "series": series,
 	}
 }
@@ -184,18 +203,25 @@ func (f *FakeAPI) listStreams(w http.ResponseWriter) {
 }
 
 func (f *FakeAPI) createStream(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Name, Description string }
+	var body struct {
+		Name        string
+		Description string
+		Tags        map[string]string
+	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
 		return
 	}
 	for _, s := range f.streams {
-		if s.Name == body.Name {
+		if s.Name == body.Name && tagsEqual(s.Tags, body.Tags) {
 			writeError(w, http.StatusConflict, "already_exists", "stream already exists")
 			return
 		}
 	}
-	s := &fakeStream{ID: f.newID("stream"), Name: body.Name, Description: body.Description, FirstSeen: "2026-09-21T00:00:00Z"}
+	s := &fakeStream{
+		ID: f.newID("stream"), Name: body.Name, Description: body.Description,
+		Tags: body.Tags, FirstSeen: "2026-09-21T00:00:00Z",
+	}
 	f.streams[s.ID] = s
 	writeJSON(w, http.StatusCreated, f.streamJSON(s))
 }
@@ -206,21 +232,35 @@ func (f *FakeAPI) updateStream(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusNotFound, "not_found", "no such stream")
 		return
 	}
-	var body map[string]string
+	var body map[string]interface{}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
 		return
 	}
-	if name, ok := body["name"]; ok {
-		for otherID, other := range f.streams {
-			if otherID != id && other.Name == name {
-				writeError(w, http.StatusConflict, "already_exists", "stream already exists")
-				return
+	newName := s.Name
+	if name, ok := body["name"].(string); ok {
+		newName = name
+	}
+	newTags := s.Tags
+	if rawTags, ok := body["tags"]; ok {
+		newTags = map[string]string{}
+		if m, ok := rawTags.(map[string]interface{}); ok {
+			for k, v := range m {
+				if sv, ok := v.(string); ok {
+					newTags[k] = sv
+				}
 			}
 		}
-		s.Name = name
 	}
-	if description, ok := body["description"]; ok {
+	for otherID, other := range f.streams {
+		if otherID != id && other.Name == newName && tagsEqual(other.Tags, newTags) {
+			writeError(w, http.StatusConflict, "already_exists", "stream already exists")
+			return
+		}
+	}
+	s.Name = newName
+	s.Tags = newTags
+	if description, ok := body["description"].(string); ok {
 		s.Description = description
 	}
 	writeJSON(w, http.StatusOK, f.streamJSON(s))
