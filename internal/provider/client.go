@@ -113,11 +113,12 @@ type SeriesInfo struct {
 }
 
 type Stream struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Description string       `json:"description"`
-	FirstSeen   string       `json:"first_seen"`
-	Series      []SeriesInfo `json:"series"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Tags        map[string]string `json:"tags"`
+	FirstSeen   string            `json:"first_seen"`
+	Series      []SeriesInfo      `json:"series"`
 }
 
 func (c *Client) ListStreams(ctx context.Context) ([]Stream, error) {
@@ -141,11 +142,14 @@ func (c *Client) FindStream(ctx context.Context, id string) (*Stream, error) {
 	return nil, nil
 }
 
-func (c *Client) CreateStream(ctx context.Context, name, description string) (*Stream, error) {
+func (c *Client) CreateStream(ctx context.Context, name, description string, tags map[string]string) (*Stream, error) {
 	var stream Stream
-	body := map[string]string{"name": name}
+	body := map[string]interface{}{"name": name}
 	if description != "" {
 		body["description"] = description
+	}
+	if tags != nil {
+		body["tags"] = tags
 	}
 	if err := c.do(ctx, http.MethodPost, "/streams", body, &stream); err != nil {
 		return nil, err
@@ -153,14 +157,17 @@ func (c *Client) CreateStream(ctx context.Context, name, description string) (*S
 	return &stream, nil
 }
 
-func (c *Client) UpdateStream(ctx context.Context, id string, name, description *string) (*Stream, error) {
+func (c *Client) UpdateStream(ctx context.Context, id string, name, description *string, tags map[string]string) (*Stream, error) {
 	var stream Stream
-	body := map[string]string{}
+	body := map[string]interface{}{}
 	if name != nil {
 		body["name"] = *name
 	}
 	if description != nil {
 		body["description"] = *description
+	}
+	if tags != nil {
+		body["tags"] = tags
 	}
 	if err := c.do(ctx, http.MethodPatch, "/streams/"+id, body, &stream); err != nil {
 		return nil, err
