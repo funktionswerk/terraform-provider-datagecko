@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 
 	"github.com/funktionswerk/terraform-provider-datagecko/internal/provider"
@@ -160,7 +161,10 @@ resource "datagecko_stream" "revenue" {
 				Check: resource.TestCheckResourceAttr("datagecko_stream.revenue", "tags.%", "0"),
 			},
 			{
-				// A tag-only change retags in place — no replace plan.
+				// A tag-only change retags in place — no replace plan. A
+				// value-only Check can't tell an update from a destroy that
+				// happens to produce the same tag on a fresh resource, so
+				// this asserts the plan's action directly.
 				Config: fmt.Sprintf(`
 provider "datagecko" {
   endpoint  = %q
@@ -172,6 +176,11 @@ resource "datagecko_stream" "revenue" {
   tags = { sales_channel = "online" }
 }
 `, fake.Server.URL),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("datagecko_stream.revenue", plancheck.ResourceActionUpdate),
+					},
+				},
 				Check: resource.TestCheckResourceAttr("datagecko_stream.revenue", "tags.sales_channel", "online"),
 			},
 		},
