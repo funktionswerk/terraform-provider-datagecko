@@ -51,11 +51,11 @@ func TestCreateStreamSameNameDifferentTagsIsNotAConflict(t *testing.T) {
 	client := NewClient(fake.Server.URL, "test", nil)
 	ctx := context.Background()
 
-	online, err := client.CreateStream(ctx, "buckle.com", "", map[string]string{"sales_channel": "online"})
+	online, err := client.CreateStream(ctx, "acme.com", "", map[string]string{"sales_channel": "online"})
 	if err != nil {
 		t.Fatalf("online create: %v", err)
 	}
-	offline, err := client.CreateStream(ctx, "buckle.com", "", map[string]string{"sales_channel": "offline"})
+	offline, err := client.CreateStream(ctx, "acme.com", "", map[string]string{"sales_channel": "offline"})
 	if err != nil {
 		t.Fatalf("offline create: %v", err)
 	}
@@ -74,11 +74,11 @@ func TestCreateStreamSameNameAndTagsIsAConflict(t *testing.T) {
 	client := NewClient(fake.Server.URL, "test", nil)
 	ctx := context.Background()
 	tags := map[string]string{"sales_channel": "online"}
-	if _, err := client.CreateStream(ctx, "buckle.com", "", tags); err != nil {
+	if _, err := client.CreateStream(ctx, "acme.com", "", tags); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
-	_, err := client.CreateStream(ctx, "buckle.com", "", tags)
+	_, err := client.CreateStream(ctx, "acme.com", "", tags)
 
 	apiErr, ok := err.(*APIError)
 	if !ok || !apiErr.IsAlreadyExists() {
@@ -91,12 +91,12 @@ func TestUpdateStreamCanRetagInPlace(t *testing.T) {
 	defer fake.Close()
 	client := NewClient(fake.Server.URL, "test", nil)
 	ctx := context.Background()
-	stream, err := client.CreateStream(ctx, "buckle.com", "", map[string]string{"sales_channel": "online"})
+	stream, err := client.CreateStream(ctx, "acme.com", "", map[string]string{"sales_channel": "online"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	name := "buckle.com"
+	name := "acme.com"
 	description := ""
 	updated, err := client.UpdateStream(ctx, stream.ID, &name, &description, map[string]string{"sales_channel": "offline"})
 	if err != nil {

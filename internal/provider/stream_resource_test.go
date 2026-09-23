@@ -113,12 +113,12 @@ provider "datagecko" {
 }
 
 resource "datagecko_stream" "online" {
-  name = "buckle.com"
+  name = "acme.com"
   tags = { sales_channel = "online" }
 }
 
 resource "datagecko_stream" "offline" {
-  name = "buckle.com"
+  name = "acme.com"
   tags = { sales_channel = "offline" }
 }
 `, fake.Server.URL),
@@ -193,12 +193,12 @@ provider "datagecko" {
 }
 
 resource "datagecko_stream" "online" {
-  name = "buckle.com"
+  name = "acme.com"
   tags = { sales_channel = "online" }
 }
 
 resource "datagecko_stream" "offline" {
-  name = "buckle.com"
+  name = "acme.com"
   tags = { sales_channel = "offline" }
 }
 `, fake.Server.URL),
@@ -211,12 +211,12 @@ provider "datagecko" {
 }
 
 resource "datagecko_stream" "online" {
-  name = "buckle.com"
+  name = "acme.com"
   tags = { sales_channel = "online" }
 }
 
 resource "datagecko_stream" "offline" {
-  name = "buckle.com"
+  name = "acme.com"
   tags = { sales_channel = "online" }
 }
 `, fake.Server.URL),
