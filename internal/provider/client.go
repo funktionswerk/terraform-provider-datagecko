@@ -338,3 +338,54 @@ func (c *Client) UpdateMetric(ctx context.Context, id, name string, params json.
 func (c *Client) DeleteMetric(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/metrics/"+id, nil, nil)
 }
+
+type StreamMetric struct {
+	Metric    string          `json:"metric"`
+	Stream    string          `json:"stream"`
+	Params    json.RawMessage `json:"params"`
+	Effective json.RawMessage `json:"effective"`
+}
+
+func streamMetricPath(streamID, metricID string) string {
+	return "/streams/" + streamID + "/metrics/" + metricID
+}
+
+// CreateStreamMetric connects a metric to a stream; a row already there is a 409.
+func (c *Client) CreateStreamMetric(ctx context.Context, streamID, metricID string, params json.RawMessage) (*StreamMetric, error) {
+	var row StreamMetric
+	body := struct {
+		MetricID string          `json:"metric_id"`
+		Params   json.RawMessage `json:"params,omitempty"`
+	}{metricID, params}
+	if err := c.do(ctx, http.MethodPost, "/streams/"+streamID+"/metrics", body, &row); err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (c *Client) GetStreamMetric(ctx context.Context, streamID, metricID string) (*StreamMetric, error) {
+	var row StreamMetric
+	if err := c.do(ctx, http.MethodGet, streamMetricPath(streamID, metricID), nil, &row); err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// ReplaceStreamMetric replaces a row's params whole; a missing row is a 404, never created.
+func (c *Client) ReplaceStreamMetric(ctx context.Context, streamID, metricID string, params json.RawMessage) (*StreamMetric, error) {
+	var row StreamMetric
+	if params == nil {
+		params = json.RawMessage(`{}`)
+	}
+	body := struct {
+		Params json.RawMessage `json:"params"`
+	}{params}
+	if err := c.do(ctx, http.MethodPut, streamMetricPath(streamID, metricID), body, &row); err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (c *Client) DeleteStreamMetric(ctx context.Context, streamID, metricID string) error {
+	return c.do(ctx, http.MethodDelete, streamMetricPath(streamID, metricID), nil, nil)
+}

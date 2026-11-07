@@ -271,3 +271,48 @@ func TestMetricLifecycleAgainstTheFake(t *testing.T) {
 		t.Fatalf("expected not found after delete, got %v", err)
 	}
 }
+
+func TestStreamMetricLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	series, _ := client.CreateSeries(ctx, stream.ID, "delivery", "", "", nil)
+	coverage, _ := client.CreateMetric(ctx, "coverage", "Coverage", nil)
+
+	row, err := client.CreateStreamMetric(ctx, stream.ID, coverage.ID, json.RawMessage(`{"target": "`+series.ID+`"}`))
+	if err != nil {
+		t.Fatalf("CreateStreamMetric: %v", err)
+	}
+	want := `{"critical_after":3,"markers":[],"target":"` + series.ID + `","warning_after":1,"window_days":30}`
+	if string(row.Effective) != want {
+		t.Fatalf("expected defaults, instance, row layered, got %s", row.Effective)
+	}
+
+	_, err = client.CreateStreamMetric(ctx, stream.ID, coverage.ID, nil)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a second create to conflict, got %v", err)
+	}
+
+	replaced, err := client.ReplaceStreamMetric(ctx, stream.ID, coverage.ID, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("ReplaceStreamMetric: %v", err)
+	}
+	if string(replaced.Params) != `{}` {
+		t.Fatalf("expected params replaced whole, got %s", replaced.Params)
+	}
+
+	_, err = client.ReplaceStreamMetric(ctx, stream.ID, "metric-unknown", json.RawMessage(`{}`))
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected a replace of a missing row to be a 404, got %v", err)
+	}
+
+	if err := client.DeleteStreamMetric(ctx, stream.ID, coverage.ID); err != nil {
+		t.Fatalf("DeleteStreamMetric: %v", err)
+	}
+	_, err = client.GetStreamMetric(ctx, stream.ID, coverage.ID)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected not found after delete, got %v", err)
+	}
+}

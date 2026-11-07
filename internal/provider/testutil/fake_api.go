@@ -184,6 +184,10 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.renameKey(w, r, segments[1])
 	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "keys":
 		f.deleteKey(w, segments[1])
+	case r.Method == http.MethodPost && len(segments) == 3 && segments[0] == "streams" && segments[2] == "metrics":
+		f.createStreamMetric(w, r, segments[1])
+	case len(segments) == 4 && segments[0] == "streams" && segments[2] == "metrics":
+		f.streamMetric(w, r, segments[1], segments[3])
 	case r.Method == http.MethodPost && path == "metrics":
 		f.createMetric(w, r)
 	case r.Method == http.MethodGet && len(segments) == 2 && segments[0] == "metrics":
@@ -597,4 +601,74 @@ func (f *FakeAPI) deleteMetric(w http.ResponseWriter, id string) {
 		delete(s.Metrics, id)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (f *FakeAPI) streamMetricJSON(s *fakeStream, m *fakeMetric) map[string]interface{} {
+	params := s.Metrics[m.ID]
+	return map[string]interface{}{
+		"metric": m.ID, "stream": s.ID, "params": nonNil(params),
+		"effective": layered(metricType(m.Type).Defaults, m.Params, params),
+	}
+}
+
+func (f *FakeAPI) createStreamMetric(w http.ResponseWriter, r *http.Request, streamID string) {
+	s, ok := f.streams[streamID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream")
+		return
+	}
+	var body struct {
+		MetricID string `json:"metric_id"`
+		Params   map[string]interface{}
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	m, ok := f.metrics[body.MetricID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	if _, exists := s.Metrics[m.ID]; exists {
+		writeError(w, http.StatusConflict, "already_exists", "that metric is already set on this stream")
+		return
+	}
+	if s.Metrics == nil {
+		s.Metrics = map[string]map[string]interface{}{}
+	}
+	s.Metrics[m.ID] = nonNil(body.Params)
+	writeJSON(w, http.StatusCreated, f.streamMetricJSON(s, m))
+}
+
+// streamMetric serves GET, PUT and DELETE of one row: a missing stream,
+// metric or row is the same 404.
+func (f *FakeAPI) streamMetric(w http.ResponseWriter, r *http.Request, streamID, metricID string) {
+	s, ok := f.streams[streamID]
+	m, mok := f.metrics[metricID]
+	if !ok || !mok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream or metric")
+		return
+	}
+	if _, exists := s.Metrics[metricID]; !exists {
+		writeError(w, http.StatusNotFound, "not_found", m.Name+" is not set on this stream")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, f.streamMetricJSON(s, m))
+	case http.MethodPut:
+		var body struct{ Params map[string]interface{} }
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		s.Metrics[metricID] = nonNil(body.Params)
+		writeJSON(w, http.StatusOK, f.streamMetricJSON(s, m))
+	case http.MethodDelete:
+		delete(s.Metrics, metricID)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
+	}
 }
