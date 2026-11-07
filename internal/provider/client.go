@@ -515,3 +515,75 @@ func (c *Client) ReplaceQueryPanels(ctx context.Context, streamID string, panels
 	}
 	return out.Panels, nil
 }
+
+type Action struct {
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	ParametersSchema json.RawMessage `json:"parameters_schema"`
+	ExpiresAfter     int64           `json:"expires_after"`
+	ResultMaxBytes   int64           `json:"result_max_bytes"`
+	RequestRole      string          `json:"request_role"`
+}
+
+// ActionInput is an action's body. A nil field is not sent, and the API then
+// stores its default — on a replace too, since a replace is whole.
+type ActionInput struct {
+	Description      *string         `json:"description,omitempty"`
+	ParametersSchema json.RawMessage `json:"parameters_schema,omitempty"`
+	ExpiresAfter     *int64          `json:"expires_after,omitempty"`
+	ResultMaxBytes   *int64          `json:"result_max_bytes,omitempty"`
+	RequestRole      *string         `json:"request_role,omitempty"`
+}
+
+func (c *Client) ListActions(ctx context.Context) ([]Action, error) {
+	var out struct {
+		Actions []Action `json:"actions"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/actions", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Actions, nil
+}
+
+// FindAction is the action of that name, or nil when there is none: the API
+// reads actions back only through the list.
+func (c *Client) FindAction(ctx context.Context, name string) (*Action, error) {
+	actions, err := c.ListActions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range actions {
+		if actions[i].Name == name {
+			return &actions[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// CreateAction declares a new action; an existing name is a 409, never adopted.
+func (c *Client) CreateAction(ctx context.Context, name string, in ActionInput) (*Action, error) {
+	body := struct {
+		Name string `json:"name"`
+		ActionInput
+	}{name, in}
+	var action Action
+	if err := c.do(ctx, http.MethodPost, "/actions", body, &action); err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+// ReplaceAction replaces the action whole; a missing one is a 404, never created.
+func (c *Client) ReplaceAction(ctx context.Context, name string, in ActionInput) (*Action, error) {
+	var action Action
+	if err := c.do(ctx, http.MethodPut, "/actions/"+name, in, &action); err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+// DeleteAction is a 409 while the action has a run in flight.
+func (c *Client) DeleteAction(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/actions/"+name, nil, nil)
+}

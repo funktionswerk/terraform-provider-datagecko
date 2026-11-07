@@ -399,3 +399,50 @@ func TestQueryPanelsRefuseDt(t *testing.T) {
 		t.Fatalf("expected the panel back, got %+v", panels)
 	}
 }
+
+func TestActionLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+
+	created, err := client.CreateAction(ctx, "rows", ActionInput{ParametersSchema: json.RawMessage(`{"properties":{"dt":{"type":"string"}}}`)})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	if created.ExpiresAfter != 10 || created.RequestRole != "member" || created.ResultMaxBytes != 1048576 {
+		t.Fatalf("expected the server's defaults, got %+v", created)
+	}
+
+	_, err = client.CreateAction(ctx, "rows", ActionInput{})
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected an existing name to conflict, got %v", err)
+	}
+
+	minutes := int64(120)
+	replaced, err := client.ReplaceAction(ctx, "rows", ActionInput{ExpiresAfter: &minutes})
+	if err != nil {
+		t.Fatalf("ReplaceAction: %v", err)
+	}
+	if replaced.ExpiresAfter != 120 || string(replaced.ParametersSchema) != `{}` {
+		t.Fatalf("expected a whole replace (omitted schema reset), got %+v", replaced)
+	}
+
+	_, err = client.ReplaceAction(ctx, "nope", ActionInput{})
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected a replace of a missing action to be a 404, got %v", err)
+	}
+
+	hours := int64(7200)
+	_, err = client.CreateAction(ctx, "slow", ActionInput{ExpiresAfter: &hours})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, "3600") {
+		t.Fatalf("expected the cap refused by name, got %v", err)
+	}
+
+	fake.SetRunInFlight("rows")
+	err = client.DeleteAction(ctx, "rows")
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a delete with a run in flight to be a 409, got %v", err)
+	}
+}

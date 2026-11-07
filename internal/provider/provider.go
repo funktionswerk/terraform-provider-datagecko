@@ -93,6 +93,7 @@ func (p *DatageckoProvider) Resources(ctx context.Context) []func() resource.Res
 		NewStreamChartsResource,
 		NewStreamSectionsResource,
 		NewStreamQueryPanelsResource,
+		NewActionResource,
 	}
 }
 

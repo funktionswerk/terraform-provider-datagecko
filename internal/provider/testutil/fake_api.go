@@ -61,13 +61,14 @@ type FakeAPI struct {
 	streams          map[string]*fakeStream
 	keys             map[string]*fakeKey
 	metrics          map[string]*fakeMetric
+	actions          map[string]*fakeAction
 	nextID           int
 	rateLimit        int
 	requiredAdminKey string
 }
 
 func NewFakeAPI() *FakeAPI {
-	f := &FakeAPI{streams: map[string]*fakeStream{}, keys: map[string]*fakeKey{}, metrics: map[string]*fakeMetric{}}
+	f := &FakeAPI{streams: map[string]*fakeStream{}, keys: map[string]*fakeKey{}, metrics: map[string]*fakeMetric{}, actions: map[string]*fakeAction{}}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.route))
 	return f
 }
@@ -197,6 +198,14 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.declaredList(w, r, segments[1], "sections", func(s *fakeStream) *[]map[string]interface{} { return &s.Sections }, nil)
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "query-panels":
 		f.declaredList(w, r, segments[1], "panels", func(s *fakeStream) *[]map[string]interface{} { return &s.Panels }, checkPanel)
+	case r.Method == http.MethodGet && path == "actions":
+		f.listActions(w)
+	case r.Method == http.MethodPost && path == "actions":
+		f.writeAction(w, r, "", true)
+	case r.Method == http.MethodPut && len(segments) == 2 && segments[0] == "actions" && segments[1] != "runners":
+		f.writeAction(w, r, segments[1], false)
+	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "actions" && segments[1] != "runners":
+		f.deleteAction(w, segments[1])
 	case r.Method == http.MethodGet && path == "metric-types":
 		f.listMetricTypes(w)
 	case r.Method == http.MethodPost && path == "metrics":
@@ -832,5 +841,121 @@ func (f *FakeAPI) DeclarePanels(streamID string, panels []map[string]interface{}
 	defer f.mu.Unlock()
 	if s, ok := f.streams[streamID]; ok {
 		s.Panels = panels
+	}
+}
+
+type fakeAction struct {
+	ID, Name, Description, RequestRole string
+	ParametersSchema                   map[string]interface{}
+	ExpiresAfter, ResultMaxBytes       int64
+	RunInFlight                        bool
+}
+
+// The API's defaults for a field a body leaves out, and its one cap a plan meets.
+const (
+	fakeExpiresAfterDefault   = 10
+	fakeExpiresAfterCap       = 3600
+	fakeResultMaxBytesDefault = 1048576
+)
+
+func (a *fakeAction) json() map[string]interface{} {
+	return map[string]interface{}{
+		"id": a.ID, "name": a.Name, "description": a.Description,
+		"parameters_schema": nonNil(a.ParametersSchema), "expires_after": a.ExpiresAfter,
+		"result_max_bytes": a.ResultMaxBytes, "request_role": a.RequestRole,
+	}
+}
+
+// SetRunInFlight marks an action as having a run in flight, so a delete is refused.
+func (f *FakeAPI) SetRunInFlight(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.actions[name]; ok {
+		a.RunInFlight = true
+	}
+}
+
+func (f *FakeAPI) listActions(w http.ResponseWriter) {
+	out := make([]map[string]interface{}, 0, len(f.actions))
+	for _, a := range f.actions {
+		out = append(out, a.json())
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"actions": out})
+}
+
+// writeAction is a create (POST, name in the body) or a whole replace (PUT,
+// name in the path): every field left out takes its default either way.
+func (f *FakeAPI) writeAction(w http.ResponseWriter, r *http.Request, name string, create bool) {
+	var body struct {
+		Name             string
+		Description      string
+		ParametersSchema map[string]interface{} `json:"parameters_schema"`
+		ExpiresAfter     *int64                 `json:"expires_after"`
+		ResultMaxBytes   *int64                 `json:"result_max_bytes"`
+		RequestRole      string                 `json:"request_role"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	existing, exists := f.actions[name]
+	if create {
+		name = body.Name
+		if _, taken := f.actions[name]; taken {
+			writeError(w, http.StatusConflict, "conflict", "an action of that name exists; PUT /actions/{name} replaces it")
+			return
+		}
+	} else if !exists {
+		writeError(w, http.StatusNotFound, "not_found", "no such action")
+		return
+	}
+	a := &fakeAction{
+		Name: name, Description: body.Description, ParametersSchema: body.ParametersSchema,
+		ExpiresAfter: fakeExpiresAfterDefault, ResultMaxBytes: fakeResultMaxBytesDefault, RequestRole: "member",
+	}
+	if body.ExpiresAfter != nil {
+		if *body.ExpiresAfter > fakeExpiresAfterCap {
+			writeError(w, http.StatusBadRequest, "payload_refused", fmt.Sprintf("expires_after must be at most %d", fakeExpiresAfterCap))
+			return
+		}
+		a.ExpiresAfter = *body.ExpiresAfter
+	}
+	if body.ResultMaxBytes != nil {
+		a.ResultMaxBytes = *body.ResultMaxBytes
+	}
+	if body.RequestRole != "" {
+		a.RequestRole = body.RequestRole
+	}
+	status := http.StatusOK
+	if create {
+		a.ID = f.newID("action")
+		status = http.StatusCreated
+	} else {
+		a.ID, a.RunInFlight = existing.ID, existing.RunInFlight
+	}
+	f.actions[name] = a
+	writeJSON(w, status, a.json())
+}
+
+func (f *FakeAPI) deleteAction(w http.ResponseWriter, name string) {
+	a, ok := f.actions[name]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such action")
+		return
+	}
+	if a.RunInFlight {
+		writeError(w, http.StatusConflict, "conflict", "the action has runs in flight; cancel them or wait")
+		return
+	}
+	delete(f.actions, name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ClearRunsInFlight ends every action's runs — they finished.
+func (f *FakeAPI) ClearRunsInFlight() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.actions {
+		a.RunInFlight = false
 	}
 }
