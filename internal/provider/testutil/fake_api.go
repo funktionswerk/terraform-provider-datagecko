@@ -28,6 +28,7 @@ type fakeStream struct {
 	ID, Name, Description, FirstSeen string
 	Tags                             map[string]string
 	Series                           []*fakeSeries
+	Metrics                          map[string]map[string]interface{} // metric id → the row's params
 }
 
 // tagsEqual reports whether two tag sets carry the same pairs, regardless of
@@ -56,13 +57,14 @@ type FakeAPI struct {
 	mu               sync.Mutex
 	streams          map[string]*fakeStream
 	keys             map[string]*fakeKey
+	metrics          map[string]*fakeMetric
 	nextID           int
 	rateLimit        int
 	requiredAdminKey string
 }
 
 func NewFakeAPI() *FakeAPI {
-	f := &FakeAPI{streams: map[string]*fakeStream{}, keys: map[string]*fakeKey{}}
+	f := &FakeAPI{streams: map[string]*fakeStream{}, keys: map[string]*fakeKey{}, metrics: map[string]*fakeMetric{}}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.route))
 	return f
 }
@@ -182,6 +184,14 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.renameKey(w, r, segments[1])
 	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "keys":
 		f.deleteKey(w, segments[1])
+	case r.Method == http.MethodPost && path == "metrics":
+		f.createMetric(w, r)
+	case r.Method == http.MethodGet && len(segments) == 2 && segments[0] == "metrics":
+		f.readMetric(w, segments[1])
+	case r.Method == http.MethodPatch && len(segments) == 2 && segments[0] == "metrics":
+		f.updateMetric(w, r, segments[1])
+	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "metrics":
+		f.deleteMetric(w, segments[1])
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "no such route: "+r.Method+" "+path)
 	}
@@ -430,5 +440,161 @@ func (f *FakeAPI) deleteKey(w http.ResponseWriter, prefix string) {
 		return
 	}
 	k.Revoked = true
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type fakeMetricType struct {
+	Key, Presentation   string
+	Defaults            map[string]interface{}
+	Required, PerStream []string
+}
+
+// fakeMetricTypes mirrors the API's catalog, in its order.
+var fakeMetricTypes = []fakeMetricType{
+	{
+		Key: "freshness", Presentation: "badge",
+		Defaults: map[string]interface{}{"warning_after": 2, "critical_after": 7},
+		Required: []string{}, PerStream: []string{},
+	},
+	{
+		Key: "coverage", Presentation: "badge",
+		Defaults: map[string]interface{}{
+			"markers": []interface{}{}, "target": "", "window_days": 30, "warning_after": 1, "critical_after": 3,
+		},
+		Required: []string{}, PerStream: []string{"markers", "target"},
+	},
+}
+
+func metricType(key string) *fakeMetricType {
+	for i := range fakeMetricTypes {
+		if fakeMetricTypes[i].Key == key {
+			return &fakeMetricTypes[i]
+		}
+	}
+	return nil
+}
+
+type fakeMetric struct {
+	ID, Type, Name string
+	Params         map[string]interface{}
+}
+
+// layered is the defaults, then each layer over the last, shallow by key.
+func layered(defaults map[string]interface{}, layers ...map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for _, layer := range layers {
+		for k, v := range layer {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func nonNil(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	return m
+}
+
+// metricJSON is re-encoded from decoded maps, so its keys come back sorted —
+// the same reordering the real API's jsonb column does.
+func (f *FakeAPI) metricJSON(m *fakeMetric) map[string]interface{} {
+	return map[string]interface{}{
+		"id": m.ID, "type": m.Type, "name": m.Name, "params": nonNil(m.Params),
+		"effective": layered(metricType(m.Type).Defaults, m.Params),
+	}
+}
+
+func (f *FakeAPI) metricNameTaken(name, exceptID string) bool {
+	for id, m := range f.metrics {
+		if id != exceptID && strings.EqualFold(m.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// DeleteAllMetrics removes every metric directly — a metric deleted outside Terraform.
+func (f *FakeAPI) DeleteAllMetrics() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.metrics = map[string]*fakeMetric{}
+	for _, s := range f.streams {
+		s.Metrics = nil
+	}
+}
+
+func (f *FakeAPI) createMetric(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Type, Name string
+		Params     map[string]interface{}
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	if metricType(body.Type) == nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", "unknown metric type "+body.Type)
+		return
+	}
+	if f.metricNameTaken(body.Name, "") {
+		writeError(w, http.StatusConflict, "already_exists", "a metric of that name exists")
+		return
+	}
+	m := &fakeMetric{ID: f.newID("metric"), Type: body.Type, Name: body.Name, Params: body.Params}
+	f.metrics[m.ID] = m
+	writeJSON(w, http.StatusCreated, f.metricJSON(m))
+}
+
+func (f *FakeAPI) readMetric(w http.ResponseWriter, id string) {
+	m, ok := f.metrics[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	writeJSON(w, http.StatusOK, f.metricJSON(m))
+}
+
+func (f *FakeAPI) updateMetric(w http.ResponseWriter, r *http.Request, id string) {
+	m, ok := f.metrics[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	var body map[string]json.RawMessage
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	if raw, ok := body["name"]; ok {
+		var name string
+		_ = json.Unmarshal(raw, &name)
+		if f.metricNameTaken(name, id) {
+			writeError(w, http.StatusConflict, "already_exists", "a metric of that name exists")
+			return
+		}
+		m.Name = name
+	}
+	if raw, ok := body["params"]; ok {
+		var params map[string]interface{}
+		_ = json.Unmarshal(raw, &params)
+		m.Params = params
+	}
+	writeJSON(w, http.StatusOK, f.metricJSON(m))
+}
+
+func (f *FakeAPI) deleteMetric(w http.ResponseWriter, id string) {
+	if _, ok := f.metrics[id]; !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	delete(f.metrics, id)
+	for _, s := range f.streams {
+		delete(s.Metrics, id)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

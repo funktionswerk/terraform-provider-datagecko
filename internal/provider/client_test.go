@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -233,5 +234,40 @@ func TestSeriesKindAndIntervalRoundTrip(t *testing.T) {
 	}
 	if cleared.Kind != "marker" {
 		t.Fatalf("expected the kind to be untouched by a PATCH, got %q", cleared.Kind)
+	}
+}
+
+func TestMetricLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+
+	created, err := client.CreateMetric(ctx, "freshness", "Freshness", json.RawMessage(`{"warning_after": 3}`))
+	if err != nil {
+		t.Fatalf("CreateMetric: %v", err)
+	}
+	if string(created.Effective) != `{"critical_after":7,"warning_after":3}` {
+		t.Fatalf("expected defaults under params, got %s", created.Effective)
+	}
+
+	_, err = client.CreateMetric(ctx, "freshness", "FRESHNESS", nil)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a case-insensitive name conflict, got %v", err)
+	}
+
+	updated, err := client.UpdateMetric(ctx, created.ID, "Fresh", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("UpdateMetric: %v", err)
+	}
+	if updated.Name != "Fresh" || string(updated.Params) != `{}` {
+		t.Fatalf("expected the rename and params replaced whole, got %+v", updated)
+	}
+	if err := client.DeleteMetric(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteMetric: %v", err)
+	}
+	_, err = client.GetMetric(ctx, created.ID)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected not found after delete, got %v", err)
 	}
 }

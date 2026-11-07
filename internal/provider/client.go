@@ -293,3 +293,48 @@ func (c *Client) RenameKey(ctx context.Context, prefix, name string) (*Key, erro
 func (c *Client) DeleteKey(ctx context.Context, prefix string) error {
 	return c.do(ctx, http.MethodDelete, "/keys/"+prefix, nil, nil)
 }
+
+type Metric struct {
+	ID        string          `json:"id"`
+	Type      string          `json:"type"`
+	Name      string          `json:"name"`
+	Params    json.RawMessage `json:"params"`
+	Effective json.RawMessage `json:"effective"`
+}
+
+// metricBody carries params as raw bytes, embedded verbatim: never
+// re-marshalled through float64, since the API's params are exact-typed.
+type metricBody struct {
+	Type   string          `json:"type,omitempty"`
+	Name   string          `json:"name"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+func (c *Client) CreateMetric(ctx context.Context, typ, name string, params json.RawMessage) (*Metric, error) {
+	var metric Metric
+	if err := c.do(ctx, http.MethodPost, "/metrics", metricBody{Type: typ, Name: name, Params: params}, &metric); err != nil {
+		return nil, err
+	}
+	return &metric, nil
+}
+
+func (c *Client) GetMetric(ctx context.Context, id string) (*Metric, error) {
+	var metric Metric
+	if err := c.do(ctx, http.MethodGet, "/metrics/"+id, nil, &metric); err != nil {
+		return nil, err
+	}
+	return &metric, nil
+}
+
+// UpdateMetric renames and replaces the params whole; a type never changes.
+func (c *Client) UpdateMetric(ctx context.Context, id, name string, params json.RawMessage) (*Metric, error) {
+	var metric Metric
+	if err := c.do(ctx, http.MethodPatch, "/metrics/"+id, metricBody{Name: name, Params: params}, &metric); err != nil {
+		return nil, err
+	}
+	return &metric, nil
+}
+
+func (c *Client) DeleteMetric(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/metrics/"+id, nil, nil)
+}

@@ -88,6 +88,7 @@ func (p *DatageckoProvider) Resources(ctx context.Context) []func() resource.Res
 		NewStreamResource,
 		NewSeriesResource,
 		NewIngestKeyResource,
+		NewMetricResource,
 	}
 }
 
