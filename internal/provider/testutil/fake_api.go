@@ -30,6 +30,7 @@ type fakeStream struct {
 	Series                           []*fakeSeries
 	Metrics                          map[string]map[string]interface{} // metric id → the row's params
 	Charts                           []map[string]interface{}
+	Sections                         []map[string]interface{}
 }
 
 // tagsEqual reports whether two tag sets carry the same pairs, regardless of
@@ -191,6 +192,8 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.streamMetric(w, r, segments[1], segments[3])
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "charts":
 		f.charts(w, r, segments[1])
+	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "sections":
+		f.declaredList(w, r, segments[1], "sections", func(s *fakeStream) *[]map[string]interface{} { return &s.Sections }, nil)
 	case r.Method == http.MethodGet && path == "metric-types":
 		f.listMetricTypes(w)
 	case r.Method == http.MethodPost && path == "metrics":
@@ -757,4 +760,53 @@ func (f *FakeAPI) charts(w http.ResponseWriter, r *http.Request, streamID string
 		charts = []map[string]interface{}{}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"charts": charts})
+}
+
+// declaredList serves GET and PUT of one of a stream's replace-whole lists
+// (sections, panels): entries stored exactly as given, fresh ids on every
+// PUT, and an optional check that refuses an entry with a 400.
+func (f *FakeAPI) declaredList(
+	w http.ResponseWriter, r *http.Request, streamID, key string,
+	list func(*fakeStream) *[]map[string]interface{}, check func(map[string]interface{}) string,
+) {
+	s, ok := f.streams[streamID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream")
+		return
+	}
+	held := list(s)
+	if r.Method == http.MethodPut {
+		var body map[string][]map[string]interface{}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		for _, entry := range body[key] {
+			if check != nil {
+				if refusal := check(entry); refusal != "" {
+					writeError(w, http.StatusBadRequest, "payload_refused", refusal)
+					return
+				}
+			}
+			entry["id"] = f.newID(key)
+		}
+		*held = body[key]
+	} else if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
+		return
+	}
+	out := *held
+	if out == nil {
+		out = []map[string]interface{}{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{key: out})
+}
+
+// DeclareSections writes a stream's sections directly — declared outside Terraform.
+func (f *FakeAPI) DeclareSections(streamID string, sections []map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		s.Sections = sections
+	}
 }

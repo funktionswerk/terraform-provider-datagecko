@@ -354,3 +354,23 @@ func TestChartsRoundTripOnlySetStyles(t *testing.T) {
 		t.Fatalf("expected the server to refuse a foreign series, got %v", err)
 	}
 }
+
+func TestSectionsKeepTheBodyExactly(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	body := "line one\n\nline two\n"
+
+	if _, err := client.ReplaceSections(ctx, stream.ID, []Section{{Title: "About", Body: body}}); err != nil {
+		t.Fatalf("ReplaceSections: %v", err)
+	}
+	sections, err := client.GetSections(ctx, stream.ID)
+	if err != nil {
+		t.Fatalf("GetSections: %v", err)
+	}
+	if len(sections) != 1 || sections[0].Body != body {
+		t.Fatalf("expected the body back byte for byte, got %+v", sections)
+	}
+}

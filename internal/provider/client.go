@@ -455,3 +455,32 @@ func (c *Client) ReplaceCharts(ctx context.Context, streamID string, charts []Ch
 	}
 	return out.Charts, nil
 }
+
+type Section struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+type sectionsBody struct {
+	Sections []Section `json:"sections"`
+}
+
+func (c *Client) GetSections(ctx context.Context, streamID string) ([]Section, error) {
+	var out sectionsBody
+	if err := c.do(ctx, http.MethodGet, "/streams/"+streamID+"/sections", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Sections, nil
+}
+
+// ReplaceSections replaces the stream's About tab whole; bodies are stored exactly as given.
+func (c *Client) ReplaceSections(ctx context.Context, streamID string, sections []Section) ([]Section, error) {
+	if sections == nil {
+		sections = []Section{}
+	}
+	var out sectionsBody
+	if err := c.do(ctx, http.MethodPut, "/streams/"+streamID+"/sections", sectionsBody{Sections: sections}, &out); err != nil {
+		return nil, err
+	}
+	return out.Sections, nil
+}
