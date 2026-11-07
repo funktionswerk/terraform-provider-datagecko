@@ -19,7 +19,7 @@ var (
 )
 
 type RunnerHookResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewRunnerHookResource() resource.Resource {
@@ -94,18 +94,6 @@ func (secretRotatesWithURL) PlanModifyString(ctx context.Context, req planmodifi
 	}
 }
 
-func (r *RunnerHookResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
-}
-
 func (r *RunnerHookResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan runnerHookModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -115,12 +103,12 @@ func (r *RunnerHookResource) Create(ctx context.Context, req resource.CreateRequ
 	prefix := plan.KeyPrefix.ValueString()
 
 	set, err := r.client.CreateHook(ctx, prefix, plan.URL.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Hook already set", fmt.Sprintf(
-			"Key %s already has a hook — declared outside Terraform; import it with the key prefix (the secret cannot be recovered).", prefix))
+	if isConflict(err) {
+		refuseExisting(&resp.Diagnostics, "Hook already set", fmt.Sprintf(
+			"Key %s already has a hook; the secret cannot be recovered on import", prefix))
 		return
 	}
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.Diagnostics.AddError("Ingest key not found", fmt.Sprintf("No live ingest key %q in this organization.", prefix))
 		return
 	}
@@ -167,7 +155,7 @@ func (r *RunnerHookResource) Update(ctx context.Context, req resource.UpdateRequ
 	}
 
 	rotated, err := r.client.ReplaceHook(ctx, plan.KeyPrefix.ValueString(), plan.URL.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.Diagnostics.AddError("Hook is gone", "The hook was cleared outside Terraform; the next plan will set it again.")
 		return
 	}
@@ -188,7 +176,7 @@ func (r *RunnerHookResource) Delete(ctx context.Context, req resource.DeleteRequ
 	}
 
 	err := r.client.DeleteHook(ctx, state.KeyPrefix.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		return
 	}
 	if err != nil {

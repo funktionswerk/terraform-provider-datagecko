@@ -21,7 +21,8 @@ internal/provider/
   provider.go                     # schema, Configure (endpoint + admin_key)
   client.go                       # the one HTTP client: auth header, error-shape decoding, retry on 429 (three windows)
   json_attrs.go                   # JSON attributes: jsontypes.Normalized in state, raw bytes on the wire
-  framework.go                    # the state/diagnostics seam Create and Update share
+  framework.go                    # what every resource shares: the embedded client holder, error predicates, the refuse/delete helpers
+  declared_list_resource.go       # the generic replace-whole list resource; charts, sections and panels are shapes of it
   stream_resource.go
   series_resource.go
   ingest_key_resource.go

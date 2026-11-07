@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -19,7 +18,7 @@ var (
 )
 
 type IngestKeyResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewIngestKeyResource() resource.Resource {
@@ -70,18 +69,6 @@ func (r *IngestKeyResource) Schema(ctx context.Context, req resource.SchemaReque
 			},
 		},
 	}
-}
-
-func (r *IngestKeyResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
 }
 
 func (r *IngestKeyResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -161,7 +148,7 @@ func (r *IngestKeyResource) Delete(ctx context.Context, req resource.DeleteReque
 	}
 
 	err := r.client.DeleteKey(ctx, state.ID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		return
 	}
 	if err != nil {

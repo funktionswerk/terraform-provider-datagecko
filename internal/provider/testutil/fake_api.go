@@ -198,7 +198,7 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 	case len(segments) == 4 && segments[0] == "streams" && segments[2] == "metrics":
 		f.streamMetric(w, r, segments[1], segments[3])
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "charts":
-		f.charts(w, r, segments[1])
+		f.declaredList(w, r, segments[1], "charts", func(s *fakeStream) *[]map[string]interface{} { return &s.Charts }, checkChart)
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "sections":
 		f.declaredList(w, r, segments[1], "sections", func(s *fakeStream) *[]map[string]interface{} { return &s.Sections }, nil)
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "query-panels":
@@ -733,6 +733,21 @@ func (f *FakeAPI) ChartCount(streamID string) int {
 	return -1
 }
 
+// checkChart is the one chart rule a plan meets: every entry names a series
+// of this stream.
+func checkChart(s *fakeStream, chart map[string]interface{}) string {
+	for _, list := range []string{"series", "markers"} {
+		entries, _ := chart[list].([]interface{})
+		for _, e := range entries {
+			id, _ := e.(map[string]interface{})["id"].(string)
+			if !s.hasSeries(id) {
+				return "no series " + id + " on this stream"
+			}
+		}
+	}
+	return ""
+}
+
 func (s *fakeStream) hasSeries(id string) bool {
 	for _, sr := range s.Series {
 		if sr.ID == id {
@@ -742,53 +757,12 @@ func (s *fakeStream) hasSeries(id string) bool {
 	return false
 }
 
-// charts serves GET and PUT of a stream's declared list. A PUT stores the
-// entries exactly as given and assigns fresh chart ids, as the API does.
-func (f *FakeAPI) charts(w http.ResponseWriter, r *http.Request, streamID string) {
-	s, ok := f.streams[streamID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "no such stream")
-		return
-	}
-	if r.Method == http.MethodPut {
-		var body struct {
-			Charts []map[string]interface{}
-		}
-		if err := decodeBody(r, &body); err != nil {
-			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
-			return
-		}
-		for _, chart := range body.Charts {
-			for _, list := range []string{"series", "markers"} {
-				entries, _ := chart[list].([]interface{})
-				for _, e := range entries {
-					id, _ := e.(map[string]interface{})["id"].(string)
-					if !s.hasSeries(id) {
-						writeError(w, http.StatusBadRequest, "payload_refused", "no series "+id+" on this stream")
-						return
-					}
-				}
-			}
-			chart["id"] = f.newID("chart")
-		}
-		s.Charts = body.Charts
-	} else if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
-		return
-	}
-	charts := s.Charts
-	if charts == nil {
-		charts = []map[string]interface{}{}
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"charts": charts})
-}
-
 // declaredList serves GET and PUT of one of a stream's replace-whole lists
 // (sections, panels): entries stored exactly as given, fresh ids on every
 // PUT, and an optional check that refuses an entry with a 400.
 func (f *FakeAPI) declaredList(
 	w http.ResponseWriter, r *http.Request, streamID, key string,
-	list func(*fakeStream) *[]map[string]interface{}, check func(map[string]interface{}) string,
+	list func(*fakeStream) *[]map[string]interface{}, check func(*fakeStream, map[string]interface{}) string,
 ) {
 	s, ok := f.streams[streamID]
 	if !ok {
@@ -804,7 +778,7 @@ func (f *FakeAPI) declaredList(
 		}
 		for _, entry := range body[key] {
 			if check != nil {
-				if refusal := check(entry); refusal != "" {
+				if refusal := check(s, entry); refusal != "" {
 					writeError(w, http.StatusBadRequest, "payload_refused", refusal)
 					return
 				}
@@ -833,7 +807,7 @@ func (f *FakeAPI) DeclareSections(streamID string, sections []map[string]interfa
 }
 
 // checkPanel is the one panel rule a plan meets: dt is datagecko's to fill.
-func checkPanel(panel map[string]interface{}) string {
+func checkPanel(_ *fakeStream, panel map[string]interface{}) string {
 	parameters, _ := panel["parameters"].(map[string]interface{})
 	if _, has := parameters["dt"]; has {
 		return "panel parameters may not carry dt; datagecko fills it"

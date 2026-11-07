@@ -20,7 +20,7 @@ var (
 )
 
 type MetricResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewMetricResource() resource.Resource {
@@ -63,18 +63,6 @@ func (r *MetricResource) Schema(ctx context.Context, req resource.SchemaRequest,
 	}
 }
 
-func (r *MetricResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
-}
-
 func (r *MetricResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan metricModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -83,8 +71,8 @@ func (r *MetricResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	metric, err := r.client.CreateMetric(ctx, plan.Type.ValueString(), plan.Name.ValueString(), rawJSON(plan.Params))
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Metric already exists", fmt.Sprintf("A metric named %q is declared outside Terraform; import it.", plan.Name.ValueString()))
+	if isConflict(err) {
+		refuseExisting(&resp.Diagnostics, "Metric already exists", fmt.Sprintf("A metric named %q exists", plan.Name.ValueString()))
 		return
 	}
 	if err != nil {
@@ -102,7 +90,7 @@ func (r *MetricResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	metric, err := r.client.GetMetric(ctx, state.ID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -121,8 +109,8 @@ func (r *MetricResource) Update(ctx context.Context, req resource.UpdateRequest,
 	}
 
 	metric, err := r.client.UpdateMetric(ctx, plan.ID.ValueString(), plan.Name.ValueString(), rawJSON(plan.Params))
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Metric already exists", fmt.Sprintf("A metric named %q is declared outside Terraform; import it.", plan.Name.ValueString()))
+	if isConflict(err) {
+		resp.Diagnostics.AddError("Metric already exists", fmt.Sprintf("Another metric is already named %q.", plan.Name.ValueString()))
 		return
 	}
 	if err != nil {
@@ -140,7 +128,7 @@ func (r *MetricResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	err := r.client.DeleteMetric(ctx, state.ID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		return
 	}
 	if err != nil {

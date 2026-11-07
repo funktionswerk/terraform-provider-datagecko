@@ -40,8 +40,11 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("datagecko API error %d (%s): %s", e.StatusCode, e.Code, e.Message)
 }
 
-func (e *APIError) IsNotFound() bool      { return e.StatusCode == http.StatusNotFound }
-func (e *APIError) IsAlreadyExists() bool { return e.StatusCode == http.StatusConflict }
+func (e *APIError) IsNotFound() bool { return e.StatusCode == http.StatusNotFound }
+func (e *APIError) IsConflict() bool { return e.StatusCode == http.StatusConflict }
+
+// IsAlreadyExists is a create's reading of a 409: the row is already there.
+func (e *APIError) IsAlreadyExists() bool { return e.IsConflict() }
 
 type errorBody struct {
 	Error struct {

@@ -22,7 +22,7 @@ var (
 )
 
 type ActionResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewActionResource() resource.Resource {
@@ -80,18 +80,6 @@ func (r *ActionResource) Schema(ctx context.Context, req resource.SchemaRequest,
 	}
 }
 
-func (r *ActionResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
-}
-
 func (r *ActionResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan actionModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -100,8 +88,8 @@ func (r *ActionResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	action, err := r.client.CreateAction(ctx, plan.Name.ValueString(), inputOf(plan))
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Action already exists", fmt.Sprintf("An action named %q is declared outside Terraform; import it.", plan.Name.ValueString()))
+	if isConflict(err) {
+		refuseExisting(&resp.Diagnostics, "Action already exists", fmt.Sprintf("An action named %q exists", plan.Name.ValueString()))
 		return
 	}
 	if err != nil {
@@ -138,7 +126,7 @@ func (r *ActionResource) Update(ctx context.Context, req resource.UpdateRequest,
 	}
 
 	action, err := r.client.ReplaceAction(ctx, plan.Name.ValueString(), inputOf(plan))
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.Diagnostics.AddError("Action is gone", "The action was deleted outside Terraform; the next plan will create it again.")
 		return
 	}
@@ -157,16 +145,11 @@ func (r *ActionResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	err := r.client.DeleteAction(ctx, state.Name.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isConflict(err) {
+		resp.Diagnostics.AddError("Action has runs in flight", apiMessage(err))
 		return
 	}
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Action has runs in flight", apiErr.Message)
-		return
-	}
-	if err != nil {
-		resp.Diagnostics.AddError("Error deleting action", err.Error())
-	}
+	finishDelete(&resp.Diagnostics, "deleting action", err)
 }
 
 func (r *ActionResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

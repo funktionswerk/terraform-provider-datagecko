@@ -21,7 +21,7 @@ var (
 )
 
 type StreamMetricResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewStreamMetricResource() resource.Resource {
@@ -58,18 +58,6 @@ func (r *StreamMetricResource) Schema(ctx context.Context, req resource.SchemaRe
 	}
 }
 
-func (r *StreamMetricResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
-}
-
 func (r *StreamMetricResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan streamMetricModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -79,14 +67,13 @@ func (r *StreamMetricResource) Create(ctx context.Context, req resource.CreateRe
 	streamID, metricID := plan.StreamID.ValueString(), plan.MetricID.ValueString()
 
 	row, err := r.client.CreateStreamMetric(ctx, streamID, metricID, rawJSON(plan.Params))
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
-		resp.Diagnostics.AddError("Stream metric already exists", fmt.Sprintf(
-			"Metric %s is already set on stream %s — declared outside Terraform; import it as %s/%s.",
-			metricID, streamID, streamID, metricID))
+	if isConflict(err) {
+		refuseExisting(&resp.Diagnostics, "Stream metric already exists", fmt.Sprintf(
+			"Metric %s is already set on stream %s; the import id is %s/%s", metricID, streamID, streamID, metricID))
 		return
 	}
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
-		resp.Diagnostics.AddError("Stream or metric not found", apiErr.Message)
+	if isNotFound(err) {
+		resp.Diagnostics.AddError("Stream or metric not found", apiMessage(err))
 		return
 	}
 	if err != nil {
@@ -104,7 +91,7 @@ func (r *StreamMetricResource) Read(ctx context.Context, req resource.ReadReques
 	}
 
 	row, err := r.client.GetStreamMetric(ctx, state.StreamID.ValueString(), state.MetricID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -123,7 +110,7 @@ func (r *StreamMetricResource) Update(ctx context.Context, req resource.UpdateRe
 	}
 
 	row, err := r.client.ReplaceStreamMetric(ctx, plan.StreamID.ValueString(), plan.MetricID.ValueString(), rawJSON(plan.Params))
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.Diagnostics.AddError("Stream metric is gone", "The row was removed outside Terraform; the next plan will create it again.")
 		return
 	}
@@ -142,7 +129,7 @@ func (r *StreamMetricResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 
 	err := r.client.DeleteStreamMetric(ctx, state.StreamID.ValueString(), state.MetricID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		return
 	}
 	if err != nil {

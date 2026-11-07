@@ -95,7 +95,7 @@ resource "datagecko_stream_metric" "b" {
   metric_id = datagecko_metric.coverage.id
 }
 `,
-			ExpectError: regexp.MustCompile("declared outside Terraform; import it"),
+			ExpectError: regexp.MustCompile(`declared outside\s+Terraform;\s+import`),
 		}},
 	})
 }

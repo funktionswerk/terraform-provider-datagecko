@@ -25,7 +25,7 @@ var (
 )
 
 type SeriesResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewSeriesResource() resource.Resource {
@@ -92,18 +92,6 @@ func (r *SeriesResource) Schema(ctx context.Context, req resource.SchemaRequest,
 	}
 }
 
-func (r *SeriesResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
-}
-
 func (r *SeriesResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan seriesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -112,11 +100,11 @@ func (r *SeriesResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	series, err := r.client.CreateSeries(ctx, plan.StreamID.ValueString(), plan.Name.ValueString(), plan.Unit.ValueString(), plan.Kind.ValueString(), plan.IntervalDays.ValueInt64Pointer())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
+	if isConflict(err) {
 		resp.Diagnostics.AddError("Series already exists", fmt.Sprintf("A series named %q already exists on this stream. Import it instead.", plan.Name.ValueString()))
 		return
 	}
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		resp.Diagnostics.AddError("Stream not found", fmt.Sprintf("No stream %q in this organization.", plan.StreamID.ValueString()))
 		return
 	}
@@ -168,7 +156,7 @@ func (r *SeriesResource) Update(ctx context.Context, req resource.UpdateRequest,
 	name := plan.Name.ValueString()
 	unit := plan.Unit.ValueString()
 	series, err := r.client.UpdateSeries(ctx, plan.StreamID.ValueString(), plan.ID.ValueString(), &name, &unit, plan.IntervalDays.ValueInt64Pointer())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
+	if isConflict(err) {
 		resp.Diagnostics.AddError("Series already exists", fmt.Sprintf("A sibling series is already named %q.", name))
 		return
 	}
@@ -190,7 +178,7 @@ func (r *SeriesResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	err := r.client.DeleteSeries(ctx, state.StreamID.ValueString(), state.ID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		return
 	}
 	if err != nil {
