@@ -50,48 +50,65 @@ type errorBody struct {
 	} `json:"error"`
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body, out interface{}) error {
-	return c.doOnce(ctx, method, path, body, out, false)
-}
+// maxRateLimitRetries is how many 429 windows a call waits out before it
+// gives up: an admin key has 120 requests a minute, and a fully declared
+// organization refreshes with more than that.
+const maxRateLimitRetries = 3
 
-func (c *Client) doOnce(ctx context.Context, method, path string, body, out interface{}, retried bool) error {
-	var reader io.Reader
+func (c *Client) do(ctx context.Context, method, path string, body, out interface{}) error {
+	var encoded []byte
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		var err error
+		encoded, err = json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("encoding request body: %w", err)
 		}
+	}
+
+	for attempt := 0; ; attempt++ {
+		resp, err := c.send(ctx, method, path, encoded)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < maxRateLimitRetries {
+			wait, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
+			resp.Body.Close()
+			if wait < 0 {
+				wait = 0
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(wait) * time.Second):
+			}
+			continue
+		}
+		defer resp.Body.Close()
+		return decodeResponse(resp, out)
+	}
+}
+
+func (c *Client) send(ctx context.Context, method, path string, encoded []byte) (*http.Response, error) {
+	var reader io.Reader
+	if encoded != nil {
 		reader = bytes.NewReader(encoded)
 	}
-
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.Endpoint, "/")+path, reader)
 	if err != nil {
-		return fmt.Errorf("building request: %w", err)
+		return nil, fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.AdminKey)
-	if body != nil {
+	if encoded != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("calling datagecko: %w", err)
+		return nil, fmt.Errorf("calling datagecko: %w", err)
 	}
-	defer resp.Body.Close()
+	return resp, nil
+}
 
-	if resp.StatusCode == http.StatusTooManyRequests && !retried {
-		wait, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-		if wait < 0 {
-			wait = 0
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(wait) * time.Second):
-		}
-		return c.doOnce(ctx, method, path, body, out, true)
-	}
-
+func decodeResponse(resp *http.Response, out interface{}) error {
 	if resp.StatusCode >= 400 {
 		var decoded errorBody
 		raw, _ := io.ReadAll(resp.Body)

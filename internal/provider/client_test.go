@@ -121,30 +121,30 @@ func TestDeleteStreamNotFound(t *testing.T) {
 	}
 }
 
-func TestClientRetriesOnceOn429(t *testing.T) {
+func TestClientRetriesUpToThreeTimesOn429(t *testing.T) {
 	fake := testutil.NewFakeAPI()
 	defer fake.Close()
-	fake.RateLimitNextRequests(1)
+	fake.RateLimitNextRequests(3)
 	client := NewClient(fake.Server.URL, "test", nil)
 
 	_, err := client.CreateStream(context.Background(), "revenue", "", nil)
 
 	if err != nil {
-		t.Fatalf("expected the retry to succeed, got %v", err)
+		t.Fatalf("expected the third retry to succeed, got %v", err)
 	}
 }
 
-func TestClientGivesUpAfterOneRetry(t *testing.T) {
+func TestClientGivesUpAfterThreeRetries(t *testing.T) {
 	fake := testutil.NewFakeAPI()
 	defer fake.Close()
-	fake.RateLimitNextRequests(2)
+	fake.RateLimitNextRequests(4)
 	client := NewClient(fake.Server.URL, "test", nil)
 
 	_, err := client.CreateStream(context.Background(), "revenue", "", nil)
 
 	apiErr, ok := err.(*APIError)
 	if !ok || apiErr.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("expected a 429 APIError after the one retry, got %v", err)
+		t.Fatalf("expected a 429 APIError after three retries, got %v", err)
 	}
 }
 
