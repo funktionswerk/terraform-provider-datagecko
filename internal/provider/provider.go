@@ -94,5 +94,7 @@ func (p *DatageckoProvider) Resources(ctx context.Context) []func() resource.Res
 }
 
 func (p *DatageckoProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewMetricTypesDataSource,
+	}
 }

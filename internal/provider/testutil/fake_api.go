@@ -188,6 +188,8 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.createStreamMetric(w, r, segments[1])
 	case len(segments) == 4 && segments[0] == "streams" && segments[2] == "metrics":
 		f.streamMetric(w, r, segments[1], segments[3])
+	case r.Method == http.MethodGet && path == "metric-types":
+		f.listMetricTypes(w)
 	case r.Method == http.MethodPost && path == "metrics":
 		f.createMetric(w, r)
 	case r.Method == http.MethodGet && len(segments) == 2 && segments[0] == "metrics":
@@ -671,4 +673,15 @@ func (f *FakeAPI) streamMetric(w http.ResponseWriter, r *http.Request, streamID,
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
 	}
+}
+
+func (f *FakeAPI) listMetricTypes(w http.ResponseWriter) {
+	out := make([]map[string]interface{}, len(fakeMetricTypes))
+	for i, t := range fakeMetricTypes {
+		out[i] = map[string]interface{}{
+			"key": t.Key, "presentation": t.Presentation, "defaults": t.Defaults,
+			"required": t.Required, "per_stream": t.PerStream,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }

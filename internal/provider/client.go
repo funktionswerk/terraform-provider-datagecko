@@ -389,3 +389,19 @@ func (c *Client) ReplaceStreamMetric(ctx context.Context, streamID, metricID str
 func (c *Client) DeleteStreamMetric(ctx context.Context, streamID, metricID string) error {
 	return c.do(ctx, http.MethodDelete, streamMetricPath(streamID, metricID), nil, nil)
 }
+
+type MetricType struct {
+	Key          string          `json:"key"`
+	Presentation string          `json:"presentation"`
+	Defaults     json.RawMessage `json:"defaults"`
+	Required     []string        `json:"required"`
+	PerStream    []string        `json:"per_stream"`
+}
+
+func (c *Client) ListMetricTypes(ctx context.Context) ([]MetricType, error) {
+	var types []MetricType
+	if err := c.do(ctx, http.MethodGet, "/metric-types", nil, &types); err != nil {
+		return nil, err
+	}
+	return types, nil
+}
