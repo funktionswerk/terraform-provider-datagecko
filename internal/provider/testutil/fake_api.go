@@ -31,6 +31,7 @@ type fakeStream struct {
 	Metrics                          map[string]map[string]interface{} // metric id → the row's params
 	Charts                           []map[string]interface{}
 	Sections                         []map[string]interface{}
+	Panels                           []map[string]interface{}
 }
 
 // tagsEqual reports whether two tag sets carry the same pairs, regardless of
@@ -194,6 +195,8 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.charts(w, r, segments[1])
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "sections":
 		f.declaredList(w, r, segments[1], "sections", func(s *fakeStream) *[]map[string]interface{} { return &s.Sections }, nil)
+	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "query-panels":
+		f.declaredList(w, r, segments[1], "panels", func(s *fakeStream) *[]map[string]interface{} { return &s.Panels }, checkPanel)
 	case r.Method == http.MethodGet && path == "metric-types":
 		f.listMetricTypes(w)
 	case r.Method == http.MethodPost && path == "metrics":
@@ -808,5 +811,26 @@ func (f *FakeAPI) DeclareSections(streamID string, sections []map[string]interfa
 	defer f.mu.Unlock()
 	if s, ok := f.streams[streamID]; ok {
 		s.Sections = sections
+	}
+}
+
+// checkPanel is the one panel rule a plan meets: dt is datagecko's to fill.
+func checkPanel(panel map[string]interface{}) string {
+	parameters, _ := panel["parameters"].(map[string]interface{})
+	if _, has := parameters["dt"]; has {
+		return "panel parameters may not carry dt; datagecko fills it"
+	}
+	if parameters == nil {
+		panel["parameters"] = map[string]interface{}{}
+	}
+	return ""
+}
+
+// DeclarePanels writes a stream's panels directly — declared outside Terraform.
+func (f *FakeAPI) DeclarePanels(streamID string, panels []map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		s.Panels = panels
 	}
 }

@@ -374,3 +374,28 @@ func TestSectionsKeepTheBodyExactly(t *testing.T) {
 		t.Fatalf("expected the body back byte for byte, got %+v", sections)
 	}
 }
+
+func TestQueryPanelsRefuseDt(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+
+	_, err := client.ReplaceQueryPanels(ctx, stream.ID, []QueryPanel{{Title: "Day", Action: "rows", Parameters: json.RawMessage(`{"dt": "x"}`)}})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, "dt") {
+		t.Fatalf("expected the server to refuse dt, got %v", err)
+	}
+
+	if _, err := client.ReplaceQueryPanels(ctx, stream.ID, []QueryPanel{{Title: "Top", Action: "rows", Parameters: json.RawMessage(`{"rows": 10}`)}}); err != nil {
+		t.Fatalf("ReplaceQueryPanels: %v", err)
+	}
+	panels, err := client.GetQueryPanels(ctx, stream.ID)
+	if err != nil {
+		t.Fatalf("GetQueryPanels: %v", err)
+	}
+	if len(panels) != 1 || string(panels[0].Parameters) != `{"rows":10}` {
+		t.Fatalf("expected the panel back, got %+v", panels)
+	}
+}

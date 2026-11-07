@@ -484,3 +484,34 @@ func (c *Client) ReplaceSections(ctx context.Context, streamID string, sections 
 	}
 	return out.Sections, nil
 }
+
+type QueryPanel struct {
+	Title      string          `json:"title"`
+	Action     string          `json:"action"`
+	Parameters json.RawMessage `json:"parameters,omitempty"`
+}
+
+type panelsBody struct {
+	Panels []QueryPanel `json:"panels"`
+}
+
+func (c *Client) GetQueryPanels(ctx context.Context, streamID string) ([]QueryPanel, error) {
+	var out panelsBody
+	if err := c.do(ctx, http.MethodGet, "/streams/"+streamID+"/query-panels", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Panels, nil
+}
+
+// ReplaceQueryPanels replaces the stream's panels whole. Each panel names an
+// action; the API does not check that it exists, and neither does this.
+func (c *Client) ReplaceQueryPanels(ctx context.Context, streamID string, panels []QueryPanel) ([]QueryPanel, error) {
+	if panels == nil {
+		panels = []QueryPanel{}
+	}
+	var out panelsBody
+	if err := c.do(ctx, http.MethodPut, "/streams/"+streamID+"/query-panels", panelsBody{Panels: panels}, &out); err != nil {
+		return nil, err
+	}
+	return out.Panels, nil
+}
