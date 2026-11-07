@@ -135,3 +135,41 @@ func TestAccRunnerHookResource_httpIsTheServersError(t *testing.T) {
 		}},
 	})
 }
+
+func TestAccRunnerHookResource_unknownURLThatResolvesUnchangedKeepsTheSecret(t *testing.T) {
+	// The url comes from a resource that is replaced in step 2, so it is
+	// unknown at plan time — and then resolves to the same value. A working
+	// runner's secret must not rotate for that: Terraform re-plans the hook
+	// once the url is known, finds no change, and never calls Update.
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	config := func(generation int) string {
+		return providerBlock(fake.Server.URL) + fmt.Sprintf(`
+resource "terraform_data" "url" {
+  triggers_replace = %d
+}
+
+resource "datagecko_ingest_key" "runner" { name = "runner" }
+
+resource "datagecko_runner_hook" "runner" {
+  key_prefix = datagecko_ingest_key.runner.id
+  # substr(id, 0, 0) is "" — but unknown while terraform_data.url is replaced.
+  url = "https://runner.example/ring${substr(terraform_data.url.id, 0, 0)}"
+}
+`, generation)
+	}
+	var first string
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6Factories(),
+		Steps: []resource.TestStep{
+			{Config: config(1), Check: captureAttr(hookName, "secret", &first)},
+			{
+				Config: config(2),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectUnknownValue(hookName, tfjsonpath.New("url")),
+				}},
+				Check: resource.TestCheckResourceAttrPtr(hookName, "secret", &first),
+			},
+		},
+	})
+}
