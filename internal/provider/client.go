@@ -405,3 +405,53 @@ func (c *Client) ListMetricTypes(ctx context.Context) ([]MetricType, error) {
 	}
 	return types, nil
 }
+
+// ChartEntry is one line on a chart: a series id and only the style fields
+// that were set — an unset field is absent on the wire and nil here.
+type ChartEntry struct {
+	ID          string   `json:"id"`
+	Color       *string  `json:"color,omitempty"`
+	Width       *float64 `json:"width,omitempty"`
+	Dash        *string  `json:"dash,omitempty"`
+	Fill        *bool    `json:"fill,omitempty"`
+	PointRadius *float64 `json:"point_radius,omitempty"`
+	PointStyle  *string  `json:"point_style,omitempty"`
+}
+
+type Chart struct {
+	Title   string       `json:"title"`
+	Series  []ChartEntry `json:"series"`
+	Markers []ChartEntry `json:"markers"`
+}
+
+type chartsBody struct {
+	Charts []Chart `json:"charts"`
+}
+
+func (c *Client) GetCharts(ctx context.Context, streamID string) ([]Chart, error) {
+	var out chartsBody
+	if err := c.do(ctx, http.MethodGet, "/streams/"+streamID+"/charts", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Charts, nil
+}
+
+// ReplaceCharts replaces the stream's declared charts whole; an empty list
+// returns the stream to its implicit chart. Lists are sent as [], never null.
+func (c *Client) ReplaceCharts(ctx context.Context, streamID string, charts []Chart) ([]Chart, error) {
+	sent := make([]Chart, len(charts))
+	for i, chart := range charts {
+		sent[i] = chart
+		if sent[i].Series == nil {
+			sent[i].Series = []ChartEntry{}
+		}
+		if sent[i].Markers == nil {
+			sent[i].Markers = []ChartEntry{}
+		}
+	}
+	var out chartsBody
+	if err := c.do(ctx, http.MethodPut, "/streams/"+streamID+"/charts", chartsBody{Charts: sent}, &out); err != nil {
+		return nil, err
+	}
+	return out.Charts, nil
+}

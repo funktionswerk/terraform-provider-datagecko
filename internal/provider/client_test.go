@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/funktionswerk/terraform-provider-datagecko/internal/provider/testutil"
@@ -314,5 +315,42 @@ func TestStreamMetricLifecycleAgainstTheFake(t *testing.T) {
 	_, err = client.GetStreamMetric(ctx, stream.ID, coverage.ID)
 	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
 		t.Fatalf("expected not found after delete, got %v", err)
+	}
+}
+
+func TestChartsRoundTripOnlySetStyles(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	delivery, _ := client.CreateSeries(ctx, stream.ID, "delivery", "", "", nil)
+	baseline, _ := client.CreateSeries(ctx, stream.ID, "baseline", "", "", nil)
+	other, _ := client.CreateStream(ctx, "orders", "", nil)
+	foreign, _ := client.CreateSeries(ctx, other.ID, "count", "", "", nil)
+	width, color := 2.5, "#f59e0b"
+
+	_, err := client.ReplaceCharts(ctx, stream.ID, []Chart{{
+		Title:  "Delivery vs baseline",
+		Series: []ChartEntry{{ID: delivery.ID, Width: &width, Color: &color}, {ID: baseline.ID}},
+	}})
+	if err != nil {
+		t.Fatalf("ReplaceCharts: %v", err)
+	}
+	charts, err := client.GetCharts(ctx, stream.ID)
+	if err != nil {
+		t.Fatalf("GetCharts: %v", err)
+	}
+	if len(charts) != 1 || charts[0].Series[0].Width == nil || *charts[0].Series[0].Width != 2.5 {
+		t.Fatalf("expected the set width back, got %+v", charts)
+	}
+	if bare := charts[0].Series[1]; bare.Width != nil || bare.Color != nil {
+		t.Fatalf("expected an unset style to stay absent, got %+v", bare)
+	}
+
+	_, err = client.ReplaceCharts(ctx, stream.ID, []Chart{{Series: []ChartEntry{{ID: foreign.ID}}}})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, "no series") {
+		t.Fatalf("expected the server to refuse a foreign series, got %v", err)
 	}
 }

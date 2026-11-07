@@ -29,6 +29,7 @@ type fakeStream struct {
 	Tags                             map[string]string
 	Series                           []*fakeSeries
 	Metrics                          map[string]map[string]interface{} // metric id → the row's params
+	Charts                           []map[string]interface{}
 }
 
 // tagsEqual reports whether two tag sets carry the same pairs, regardless of
@@ -188,6 +189,8 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.createStreamMetric(w, r, segments[1])
 	case len(segments) == 4 && segments[0] == "streams" && segments[2] == "metrics":
 		f.streamMetric(w, r, segments[1], segments[3])
+	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "charts":
+		f.charts(w, r, segments[1])
 	case r.Method == http.MethodGet && path == "metric-types":
 		f.listMetricTypes(w)
 	case r.Method == http.MethodPost && path == "metrics":
@@ -684,4 +687,74 @@ func (f *FakeAPI) listMetricTypes(w http.ResponseWriter) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// DeclareCharts writes a stream's chart list directly — charts declared
+// outside Terraform. Each chart is its wire shape: title, series, markers.
+func (f *FakeAPI) DeclareCharts(streamID string, charts []map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		s.Charts = charts
+	}
+}
+
+// ChartCount is how many charts a stream has declared.
+func (f *FakeAPI) ChartCount(streamID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		return len(s.Charts)
+	}
+	return -1
+}
+
+func (s *fakeStream) hasSeries(id string) bool {
+	for _, sr := range s.Series {
+		if sr.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// charts serves GET and PUT of a stream's declared list. A PUT stores the
+// entries exactly as given and assigns fresh chart ids, as the API does.
+func (f *FakeAPI) charts(w http.ResponseWriter, r *http.Request, streamID string) {
+	s, ok := f.streams[streamID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream")
+		return
+	}
+	if r.Method == http.MethodPut {
+		var body struct {
+			Charts []map[string]interface{}
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		for _, chart := range body.Charts {
+			for _, list := range []string{"series", "markers"} {
+				entries, _ := chart[list].([]interface{})
+				for _, e := range entries {
+					id, _ := e.(map[string]interface{})["id"].(string)
+					if !s.hasSeries(id) {
+						writeError(w, http.StatusBadRequest, "payload_refused", "no series "+id+" on this stream")
+						return
+					}
+				}
+			}
+			chart["id"] = f.newID("chart")
+		}
+		s.Charts = body.Charts
+	} else if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
+		return
+	}
+	charts := s.Charts
+	if charts == nil {
+		charts = []map[string]interface{}{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"charts": charts})
 }
