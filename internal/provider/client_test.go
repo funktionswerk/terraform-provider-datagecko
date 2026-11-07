@@ -174,12 +174,12 @@ func TestSeriesAndKeyLifecycleAgainstTheFake(t *testing.T) {
 	ctx := context.Background()
 
 	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
-	series, err := client.CreateSeries(ctx, stream.ID, "delivery", "USD")
+	series, err := client.CreateSeries(ctx, stream.ID, "delivery", "USD", "", nil)
 	if err != nil {
 		t.Fatalf("CreateSeries: %v", err)
 	}
 	newName := "delivered"
-	if _, err := client.UpdateSeries(ctx, stream.ID, series.ID, &newName, nil); err != nil {
+	if _, err := client.UpdateSeries(ctx, stream.ID, series.ID, &newName, nil, nil); err != nil {
 		t.Fatalf("UpdateSeries: %v", err)
 	}
 	if err := client.DeleteSeries(ctx, stream.ID, series.ID); err != nil {
@@ -205,5 +205,33 @@ func TestSeriesAndKeyLifecycleAgainstTheFake(t *testing.T) {
 	}
 	if found != nil {
 		t.Fatalf("expected a revoked key to be findable-none, got %+v", found)
+	}
+}
+
+func TestSeriesKindAndIntervalRoundTrip(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	seven := int64(7)
+
+	series, err := client.CreateSeries(ctx, stream.ID, "deployed", "", "marker", &seven)
+	if err != nil {
+		t.Fatalf("CreateSeries: %v", err)
+	}
+	if series.Kind != "marker" || series.IntervalDays == nil || *series.IntervalDays != 7 {
+		t.Fatalf("expected kind marker and interval 7 back, got %+v", series)
+	}
+
+	cleared, err := client.UpdateSeries(ctx, stream.ID, series.ID, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("UpdateSeries: %v", err)
+	}
+	if cleared.IntervalDays != nil {
+		t.Fatalf("expected a null interval_days to clear the cadence, got %v", *cleared.IntervalDays)
+	}
+	if cleared.Kind != "marker" {
+		t.Fatalf("expected the kind to be untouched by a PATCH, got %q", cleared.Kind)
 	}
 }

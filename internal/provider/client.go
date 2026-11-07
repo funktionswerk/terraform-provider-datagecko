@@ -123,10 +123,12 @@ func decodeResponse(resp *http.Response, out interface{}) error {
 }
 
 type SeriesInfo struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Unit        string  `json:"unit"`
-	LastPointAt *string `json:"last_point_at"`
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Unit         string  `json:"unit"`
+	Kind         string  `json:"kind"`
+	IntervalDays *int64  `json:"interval_days"`
+	LastPointAt  *string `json:"last_point_at"`
 }
 
 type Stream struct {
@@ -196,11 +198,17 @@ func (c *Client) DeleteStream(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/streams/"+id, nil, nil)
 }
 
-func (c *Client) CreateSeries(ctx context.Context, streamID, name, unit string) (*SeriesInfo, error) {
+func (c *Client) CreateSeries(ctx context.Context, streamID, name, unit, kind string, intervalDays *int64) (*SeriesInfo, error) {
 	var series SeriesInfo
-	body := map[string]string{"name": name}
+	body := map[string]interface{}{"name": name}
 	if unit != "" {
 		body["unit"] = unit
+	}
+	if kind != "" {
+		body["kind"] = kind
+	}
+	if intervalDays != nil {
+		body["interval_days"] = *intervalDays
 	}
 	if err := c.do(ctx, http.MethodPost, "/streams/"+streamID+"/series", body, &series); err != nil {
 		return nil, err
@@ -208,9 +216,11 @@ func (c *Client) CreateSeries(ctx context.Context, streamID, name, unit string) 
 	return &series, nil
 }
 
-func (c *Client) UpdateSeries(ctx context.Context, streamID, seriesID string, name, unit *string) (*SeriesInfo, error) {
+// UpdateSeries always sends interval_days: a nil intervalDays is JSON null,
+// which clears the cadence. A series' kind never changes.
+func (c *Client) UpdateSeries(ctx context.Context, streamID, seriesID string, name, unit *string, intervalDays *int64) (*SeriesInfo, error) {
 	var series SeriesInfo
-	body := map[string]string{}
+	body := map[string]interface{}{"interval_days": intervalDays}
 	if name != nil {
 		body["name"] = *name
 	}

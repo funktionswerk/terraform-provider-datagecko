@@ -13,7 +13,15 @@ import (
 )
 
 type fakeSeries struct {
-	ID, Name, Unit string
+	ID, Name, Unit, Kind string
+	IntervalDays         *int64
+}
+
+func seriesJSON(sr *fakeSeries) map[string]interface{} {
+	return map[string]interface{}{
+		"id": sr.ID, "name": sr.Name, "unit": sr.Unit, "kind": sr.Kind,
+		"interval_days": sr.IntervalDays, "last_point_at": nil,
+	}
 }
 
 type fakeStream struct {
@@ -182,7 +190,7 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 func (f *FakeAPI) streamJSON(s *fakeStream) map[string]interface{} {
 	series := make([]map[string]interface{}, len(s.Series))
 	for i, sr := range s.Series {
-		series[i] = map[string]interface{}{"id": sr.ID, "name": sr.Name, "unit": sr.Unit, "last_point_at": nil}
+		series[i] = seriesJSON(sr)
 	}
 	tags := s.Tags
 	if tags == nil {
@@ -281,10 +289,16 @@ func (f *FakeAPI) createSeries(w http.ResponseWriter, r *http.Request, streamID 
 		writeError(w, http.StatusNotFound, "not_found", "no such stream")
 		return
 	}
-	var body struct{ Name, Unit string }
+	var body struct {
+		Name, Unit, Kind string
+		IntervalDays     *int64 `json:"interval_days"`
+	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
 		return
+	}
+	if body.Kind == "" {
+		body.Kind = "measure"
 	}
 	for _, sr := range s.Series {
 		if sr.Name == body.Name {
@@ -292,11 +306,12 @@ func (f *FakeAPI) createSeries(w http.ResponseWriter, r *http.Request, streamID 
 			return
 		}
 	}
-	series := &fakeSeries{ID: f.newID("series"), Name: body.Name, Unit: body.Unit}
+	series := &fakeSeries{
+		ID: f.newID("series"), Name: body.Name, Unit: body.Unit, Kind: body.Kind,
+		IntervalDays: body.IntervalDays,
+	}
 	s.Series = append(s.Series, series)
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"id": series.ID, "name": series.Name, "unit": series.Unit, "last_point_at": nil,
-	})
+	writeJSON(w, http.StatusCreated, seriesJSON(series))
 }
 
 func (f *FakeAPI) findSeries(streamID, seriesID string) (*fakeStream, *fakeSeries, bool) {
@@ -318,12 +333,15 @@ func (f *FakeAPI) updateSeries(w http.ResponseWriter, r *http.Request, streamID,
 		writeError(w, http.StatusNotFound, "not_found", "no such series")
 		return
 	}
-	var body map[string]string
+	// Raw values, so an absent interval_days is told apart from a null one.
+	var body map[string]json.RawMessage
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
 		return
 	}
-	if name, ok := body["name"]; ok {
+	if raw, ok := body["name"]; ok {
+		var name string
+		_ = json.Unmarshal(raw, &name)
 		for _, other := range s.Series {
 			if other.ID != seriesID && other.Name == name {
 				writeError(w, http.StatusConflict, "already_exists", "series already exists")
@@ -332,12 +350,15 @@ func (f *FakeAPI) updateSeries(w http.ResponseWriter, r *http.Request, streamID,
 		}
 		series.Name = name
 	}
-	if unit, ok := body["unit"]; ok {
-		series.Unit = unit
+	if raw, ok := body["unit"]; ok {
+		_ = json.Unmarshal(raw, &series.Unit)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"id": series.ID, "name": series.Name, "unit": series.Unit, "last_point_at": nil,
-	})
+	if raw, ok := body["interval_days"]; ok {
+		var days *int64
+		_ = json.Unmarshal(raw, &days)
+		series.IntervalDays = days
+	}
+	writeJSON(w, http.StatusOK, seriesJSON(series))
 }
 
 func (f *FakeAPI) deleteSeries(w http.ResponseWriter, streamID, seriesID string) {
