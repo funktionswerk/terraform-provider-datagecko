@@ -51,6 +51,11 @@ func tagsEqual(a, b map[string]string) bool {
 type fakeKey struct {
 	Prefix, Name, Role, Secret string
 	Revoked                    bool
+	Hook                       *fakeHook
+}
+
+type fakeHook struct {
+	URL, Secret string
 }
 
 // FakeAPI is a minimal in-memory double of one organization's /api/v1/.
@@ -198,6 +203,10 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.declaredList(w, r, segments[1], "sections", func(s *fakeStream) *[]map[string]interface{} { return &s.Sections }, nil)
 	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "query-panels":
 		f.declaredList(w, r, segments[1], "panels", func(s *fakeStream) *[]map[string]interface{} { return &s.Panels }, checkPanel)
+	case r.Method == http.MethodGet && path == "actions/runners":
+		f.listRunners(w)
+	case len(segments) == 3 && segments[0] == "keys" && segments[2] == "hook":
+		f.hook(w, r, segments[1])
 	case r.Method == http.MethodGet && path == "actions":
 		f.listActions(w)
 	case r.Method == http.MethodPost && path == "actions":
@@ -957,5 +966,66 @@ func (f *FakeAPI) ClearRunsInFlight() {
 	defer f.mu.Unlock()
 	for _, a := range f.actions {
 		a.RunInFlight = false
+	}
+}
+
+func (f *FakeAPI) listRunners(w http.ResponseWriter) {
+	out := make([]map[string]interface{}, 0, len(f.keys))
+	for _, k := range f.keys {
+		if k.Revoked || k.Role != "ingest" {
+			continue
+		}
+		var hook interface{}
+		if k.Hook != nil {
+			hook = map[string]interface{}{"url": k.Hook.URL, "last_ring_at": nil, "last_ring_status": ""}
+		}
+		out = append(out, map[string]interface{}{
+			"prefix": k.Prefix, "name": k.Name, "last_claim_at": nil, "in_flight": 0, "hook": hook,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"runners": out})
+}
+
+// hook serves POST (set once), PUT (replace, new secret) and DELETE of a
+// key's hook. The secret is shown in the response and nowhere else.
+func (f *FakeAPI) hook(w http.ResponseWriter, r *http.Request, prefix string) {
+	k, ok := f.keys[prefix]
+	if !ok || k.Revoked {
+		writeError(w, http.StatusNotFound, "not_found", "no such key")
+		return
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPut:
+		var body struct{ URL string }
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		if !strings.HasPrefix(body.URL, "https://") {
+			writeError(w, http.StatusBadRequest, "payload_refused", "hook url must be https")
+			return
+		}
+		status := http.StatusOK
+		if r.Method == http.MethodPost {
+			if k.Hook != nil {
+				writeError(w, http.StatusConflict, "conflict", "this key has a hook; PUT replaces it")
+				return
+			}
+			status = http.StatusCreated
+		} else if k.Hook == nil {
+			writeError(w, http.StatusNotFound, "not_found", "this key has no hook")
+			return
+		}
+		k.Hook = &fakeHook{URL: body.URL, Secret: f.newID(prefix + ".hook")}
+		writeJSON(w, status, map[string]string{"url": k.Hook.URL, "secret": k.Hook.Secret})
+	case http.MethodDelete:
+		if k.Hook == nil {
+			writeError(w, http.StatusNotFound, "not_found", "this key has no hook")
+			return
+		}
+		k.Hook = nil
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
 	}
 }

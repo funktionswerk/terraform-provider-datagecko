@@ -446,3 +446,46 @@ func TestActionLifecycleAgainstTheFake(t *testing.T) {
 		t.Fatalf("expected a delete with a run in flight to be a 409, got %v", err)
 	}
 }
+
+func TestHookLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	key, _ := client.CreateIngestKey(ctx, "runner")
+	other, _ := client.CreateIngestKey(ctx, "other")
+
+	set, err := client.CreateHook(ctx, key.Prefix, "https://runner.example/ring")
+	if err != nil || set.Secret == "" {
+		t.Fatalf("CreateHook: expected a secret, got %+v, %v", set, err)
+	}
+	_, err = client.CreateHook(ctx, key.Prefix, "https://runner.example/ring")
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a second hook to conflict, got %v", err)
+	}
+
+	rotated, err := client.ReplaceHook(ctx, key.Prefix, "https://runner.example/v2")
+	if err != nil {
+		t.Fatalf("ReplaceHook: %v", err)
+	}
+	if rotated.Secret == set.Secret {
+		t.Fatal("expected a replace to rotate the secret")
+	}
+	runner, err := client.FindRunner(ctx, key.Prefix)
+	if err != nil || runner == nil || runner.Hook == nil || runner.Hook.URL != "https://runner.example/v2" {
+		t.Fatalf("expected the runner to show the new url, got %+v, %v", runner, err)
+	}
+
+	_, err = client.CreateHook(ctx, other.Prefix, "http://runner.example/ring")
+	if apiErr, ok := err.(*APIError); !ok || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected an http url refused, got %v", err)
+	}
+
+	if err := client.DeleteHook(ctx, key.Prefix); err != nil {
+		t.Fatalf("DeleteHook: %v", err)
+	}
+	runner, _ = client.FindRunner(ctx, key.Prefix)
+	if runner == nil || runner.Hook != nil {
+		t.Fatalf("expected the hook gone and the runner kept, got %+v", runner)
+	}
+}

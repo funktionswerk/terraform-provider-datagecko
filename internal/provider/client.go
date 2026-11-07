@@ -587,3 +587,71 @@ func (c *Client) ReplaceAction(ctx context.Context, name string, in ActionInput)
 func (c *Client) DeleteAction(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/actions/"+name, nil, nil)
 }
+
+type RunnerHook struct {
+	URL            string  `json:"url"`
+	LastRingAt     *string `json:"last_ring_at"`
+	LastRingStatus string  `json:"last_ring_status"`
+}
+
+type Runner struct {
+	Prefix string      `json:"prefix"`
+	Name   string      `json:"name"`
+	Hook   *RunnerHook `json:"hook"`
+}
+
+type HookSecret struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+}
+
+func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
+	var out struct {
+		Runners []Runner `json:"runners"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/actions/runners", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Runners, nil
+}
+
+// FindRunner is the live ingest key's runner row, or nil: hooks are read
+// back only through the runners list, never with their secret.
+func (c *Client) FindRunner(ctx context.Context, prefix string) (*Runner, error) {
+	runners, err := c.ListRunners(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range runners {
+		if runners[i].Prefix == prefix {
+			return &runners[i], nil
+		}
+	}
+	return nil, nil
+}
+
+type hookBody struct {
+	URL string `json:"url"`
+}
+
+// CreateHook sets a key's hook; a key that has one is a 409, never adopted.
+func (c *Client) CreateHook(ctx context.Context, prefix, url string) (*HookSecret, error) {
+	var out HookSecret
+	if err := c.do(ctx, http.MethodPost, "/keys/"+prefix+"/hook", hookBody{url}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReplaceHook changes a key's hook and always issues a new secret; no hook is a 404.
+func (c *Client) ReplaceHook(ctx context.Context, prefix, url string) (*HookSecret, error) {
+	var out HookSecret
+	if err := c.do(ctx, http.MethodPut, "/keys/"+prefix+"/hook", hookBody{url}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DeleteHook(ctx context.Context, prefix string) error {
+	return c.do(ctx, http.MethodDelete, "/keys/"+prefix+"/hook", nil, nil)
+}
