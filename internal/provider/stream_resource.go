@@ -27,7 +27,7 @@ var (
 )
 
 type StreamResource struct {
-	client *Client
+	clientHolder
 }
 
 func NewStreamResource() resource.Resource {
@@ -83,18 +83,6 @@ func (r *StreamResource) Schema(ctx context.Context, req resource.SchemaRequest,
 	}
 }
 
-func (r *StreamResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *Client, got: %T", req.ProviderData))
-		return
-	}
-	r.client = client
-}
-
 func (r *StreamResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan streamModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -109,7 +97,7 @@ func (r *StreamResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	stream, err := r.client.CreateStream(ctx, plan.Name.ValueString(), plan.Description.ValueString(), tags)
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
+	if isConflict(err) {
 		resp.Diagnostics.AddError(
 			"Stream already exists",
 			fmt.Sprintf("A stream named %q with these tags already exists in this organization. Import it instead: terraform import <this resource's address> <id>.", plan.Name.ValueString()),
@@ -170,7 +158,7 @@ func (r *StreamResource) Update(ctx context.Context, req resource.UpdateRequest,
 	name := plan.Name.ValueString()
 	description := plan.Description.ValueString()
 	stream, err := r.client.UpdateStream(ctx, plan.ID.ValueString(), &name, &description, tags)
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsAlreadyExists() {
+	if isConflict(err) {
 		resp.Diagnostics.AddError("Stream already exists", fmt.Sprintf("A stream named %q with these tags already exists in this organization.", name))
 		return
 	}
@@ -195,7 +183,7 @@ func (r *StreamResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	err := r.client.DeleteStream(ctx, state.ID.ValueString())
-	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+	if isNotFound(err) {
 		return
 	}
 	if err != nil {

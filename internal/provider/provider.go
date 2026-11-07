@@ -39,7 +39,7 @@ func (p *DatageckoProvider) Metadata(ctx context.Context, req provider.MetadataR
 
 func (p *DatageckoProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages datagecko streams, series, and ingest keys for one organization.",
+		Description: "Manages datagecko streams, series, metrics, charts, sections, query panels, actions, runner hooks and ingest keys for one organization.",
 		Attributes: map[string]schema.Attribute{
 			"endpoint": schema.StringAttribute{
 				Optional:    true,
@@ -88,9 +88,18 @@ func (p *DatageckoProvider) Resources(ctx context.Context) []func() resource.Res
 		NewStreamResource,
 		NewSeriesResource,
 		NewIngestKeyResource,
+		NewMetricResource,
+		NewStreamMetricResource,
+		NewStreamChartsResource,
+		NewStreamSectionsResource,
+		NewStreamQueryPanelsResource,
+		NewActionResource,
+		NewRunnerHookResource,
 	}
 }
 
 func (p *DatageckoProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewMetricTypesDataSource,
+	}
 }

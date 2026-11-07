@@ -13,13 +13,25 @@ import (
 )
 
 type fakeSeries struct {
-	ID, Name, Unit string
+	ID, Name, Unit, Kind string
+	IntervalDays         *int64
+}
+
+func seriesJSON(sr *fakeSeries) map[string]interface{} {
+	return map[string]interface{}{
+		"id": sr.ID, "name": sr.Name, "unit": sr.Unit, "kind": sr.Kind,
+		"interval_days": sr.IntervalDays, "last_point_at": nil,
+	}
 }
 
 type fakeStream struct {
 	ID, Name, Description, FirstSeen string
 	Tags                             map[string]string
 	Series                           []*fakeSeries
+	Metrics                          map[string]map[string]interface{} // metric id → the row's params
+	Charts                           []map[string]interface{}
+	Sections                         []map[string]interface{}
+	Panels                           []map[string]interface{}
 }
 
 // tagsEqual reports whether two tag sets carry the same pairs, regardless of
@@ -39,6 +51,11 @@ func tagsEqual(a, b map[string]string) bool {
 type fakeKey struct {
 	Prefix, Name, Role, Secret string
 	Revoked                    bool
+	Hook                       *fakeHook
+}
+
+type fakeHook struct {
+	URL, Secret string
 }
 
 // FakeAPI is a minimal in-memory double of one organization's /api/v1/.
@@ -48,13 +65,15 @@ type FakeAPI struct {
 	mu               sync.Mutex
 	streams          map[string]*fakeStream
 	keys             map[string]*fakeKey
+	metrics          map[string]*fakeMetric
+	actions          map[string]*fakeAction
 	nextID           int
 	rateLimit        int
 	requiredAdminKey string
 }
 
 func NewFakeAPI() *FakeAPI {
-	f := &FakeAPI{streams: map[string]*fakeStream{}, keys: map[string]*fakeKey{}}
+	f := &FakeAPI{streams: map[string]*fakeStream{}, keys: map[string]*fakeKey{}, metrics: map[string]*fakeMetric{}, actions: map[string]*fakeAction{}}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.route))
 	return f
 }
@@ -174,6 +193,38 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.renameKey(w, r, segments[1])
 	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "keys":
 		f.deleteKey(w, segments[1])
+	case r.Method == http.MethodPost && len(segments) == 3 && segments[0] == "streams" && segments[2] == "metrics":
+		f.createStreamMetric(w, r, segments[1])
+	case len(segments) == 4 && segments[0] == "streams" && segments[2] == "metrics":
+		f.streamMetric(w, r, segments[1], segments[3])
+	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "charts":
+		f.declaredList(w, r, segments[1], "charts", func(s *fakeStream) *[]map[string]interface{} { return &s.Charts }, checkChart)
+	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "sections":
+		f.declaredList(w, r, segments[1], "sections", func(s *fakeStream) *[]map[string]interface{} { return &s.Sections }, nil)
+	case len(segments) == 3 && segments[0] == "streams" && segments[2] == "query-panels":
+		f.declaredList(w, r, segments[1], "panels", func(s *fakeStream) *[]map[string]interface{} { return &s.Panels }, checkPanel)
+	case r.Method == http.MethodGet && path == "actions/runners":
+		f.listRunners(w)
+	case len(segments) == 3 && segments[0] == "keys" && segments[2] == "hook":
+		f.hook(w, r, segments[1])
+	case r.Method == http.MethodGet && path == "actions":
+		f.listActions(w)
+	case r.Method == http.MethodPost && path == "actions":
+		f.writeAction(w, r, "", true)
+	case r.Method == http.MethodPut && len(segments) == 2 && segments[0] == "actions" && segments[1] != "runners":
+		f.writeAction(w, r, segments[1], false)
+	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "actions" && segments[1] != "runners":
+		f.deleteAction(w, segments[1])
+	case r.Method == http.MethodGet && path == "metric-types":
+		f.listMetricTypes(w)
+	case r.Method == http.MethodPost && path == "metrics":
+		f.createMetric(w, r)
+	case r.Method == http.MethodGet && len(segments) == 2 && segments[0] == "metrics":
+		f.readMetric(w, segments[1])
+	case r.Method == http.MethodPatch && len(segments) == 2 && segments[0] == "metrics":
+		f.updateMetric(w, r, segments[1])
+	case r.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "metrics":
+		f.deleteMetric(w, segments[1])
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "no such route: "+r.Method+" "+path)
 	}
@@ -182,7 +233,7 @@ func (f *FakeAPI) route(w http.ResponseWriter, r *http.Request) {
 func (f *FakeAPI) streamJSON(s *fakeStream) map[string]interface{} {
 	series := make([]map[string]interface{}, len(s.Series))
 	for i, sr := range s.Series {
-		series[i] = map[string]interface{}{"id": sr.ID, "name": sr.Name, "unit": sr.Unit, "last_point_at": nil}
+		series[i] = seriesJSON(sr)
 	}
 	tags := s.Tags
 	if tags == nil {
@@ -281,10 +332,16 @@ func (f *FakeAPI) createSeries(w http.ResponseWriter, r *http.Request, streamID 
 		writeError(w, http.StatusNotFound, "not_found", "no such stream")
 		return
 	}
-	var body struct{ Name, Unit string }
+	var body struct {
+		Name, Unit, Kind string
+		IntervalDays     *int64 `json:"interval_days"`
+	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
 		return
+	}
+	if body.Kind == "" {
+		body.Kind = "measure"
 	}
 	for _, sr := range s.Series {
 		if sr.Name == body.Name {
@@ -292,11 +349,12 @@ func (f *FakeAPI) createSeries(w http.ResponseWriter, r *http.Request, streamID 
 			return
 		}
 	}
-	series := &fakeSeries{ID: f.newID("series"), Name: body.Name, Unit: body.Unit}
+	series := &fakeSeries{
+		ID: f.newID("series"), Name: body.Name, Unit: body.Unit, Kind: body.Kind,
+		IntervalDays: body.IntervalDays,
+	}
 	s.Series = append(s.Series, series)
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"id": series.ID, "name": series.Name, "unit": series.Unit, "last_point_at": nil,
-	})
+	writeJSON(w, http.StatusCreated, seriesJSON(series))
 }
 
 func (f *FakeAPI) findSeries(streamID, seriesID string) (*fakeStream, *fakeSeries, bool) {
@@ -318,12 +376,15 @@ func (f *FakeAPI) updateSeries(w http.ResponseWriter, r *http.Request, streamID,
 		writeError(w, http.StatusNotFound, "not_found", "no such series")
 		return
 	}
-	var body map[string]string
+	// Raw values, so an absent interval_days is told apart from a null one.
+	var body map[string]json.RawMessage
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
 		return
 	}
-	if name, ok := body["name"]; ok {
+	if raw, ok := body["name"]; ok {
+		var name string
+		_ = json.Unmarshal(raw, &name)
 		for _, other := range s.Series {
 			if other.ID != seriesID && other.Name == name {
 				writeError(w, http.StatusConflict, "already_exists", "series already exists")
@@ -332,12 +393,15 @@ func (f *FakeAPI) updateSeries(w http.ResponseWriter, r *http.Request, streamID,
 		}
 		series.Name = name
 	}
-	if unit, ok := body["unit"]; ok {
-		series.Unit = unit
+	if raw, ok := body["unit"]; ok {
+		_ = json.Unmarshal(raw, &series.Unit)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"id": series.ID, "name": series.Name, "unit": series.Unit, "last_point_at": nil,
-	})
+	if raw, ok := body["interval_days"]; ok {
+		var days *int64
+		_ = json.Unmarshal(raw, &days)
+		series.IntervalDays = days
+	}
+	writeJSON(w, http.StatusOK, seriesJSON(series))
 }
 
 func (f *FakeAPI) deleteSeries(w http.ResponseWriter, streamID, seriesID string) {
@@ -410,4 +474,532 @@ func (f *FakeAPI) deleteKey(w http.ResponseWriter, prefix string) {
 	}
 	k.Revoked = true
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type fakeMetricType struct {
+	Key, Presentation   string
+	Defaults            map[string]interface{}
+	Required, PerStream []string
+}
+
+// fakeMetricTypes mirrors the API's catalog, in its order.
+var fakeMetricTypes = []fakeMetricType{
+	{
+		Key: "freshness", Presentation: "badge",
+		Defaults: map[string]interface{}{"warning_after": 2, "critical_after": 7},
+		Required: []string{}, PerStream: []string{},
+	},
+	{
+		Key: "coverage", Presentation: "badge",
+		Defaults: map[string]interface{}{
+			"markers": []interface{}{}, "target": "", "window_days": 30, "warning_after": 1, "critical_after": 3,
+		},
+		Required: []string{}, PerStream: []string{"markers", "target"},
+	},
+}
+
+func metricType(key string) *fakeMetricType {
+	for i := range fakeMetricTypes {
+		if fakeMetricTypes[i].Key == key {
+			return &fakeMetricTypes[i]
+		}
+	}
+	return nil
+}
+
+type fakeMetric struct {
+	ID, Type, Name string
+	Params         map[string]interface{}
+}
+
+// layered is the defaults, then each layer over the last, shallow by key.
+func layered(defaults map[string]interface{}, layers ...map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for _, layer := range layers {
+		for k, v := range layer {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func nonNil(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	return m
+}
+
+// metricJSON is re-encoded from decoded maps, so its keys come back sorted —
+// the same reordering the real API's jsonb column does.
+func (f *FakeAPI) metricJSON(m *fakeMetric) map[string]interface{} {
+	return map[string]interface{}{
+		"id": m.ID, "type": m.Type, "name": m.Name, "params": nonNil(m.Params),
+		"effective": layered(metricType(m.Type).Defaults, m.Params),
+	}
+}
+
+func (f *FakeAPI) metricNameTaken(name, exceptID string) bool {
+	for id, m := range f.metrics {
+		if id != exceptID && strings.EqualFold(m.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// DeleteAllMetrics removes every metric directly — a metric deleted outside Terraform.
+func (f *FakeAPI) DeleteAllMetrics() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.metrics = map[string]*fakeMetric{}
+	for _, s := range f.streams {
+		s.Metrics = nil
+	}
+}
+
+func (f *FakeAPI) createMetric(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Type, Name string
+		Params     map[string]interface{}
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	if metricType(body.Type) == nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", "unknown metric type "+body.Type)
+		return
+	}
+	if f.metricNameTaken(body.Name, "") {
+		writeError(w, http.StatusConflict, "already_exists", "a metric of that name exists")
+		return
+	}
+	m := &fakeMetric{ID: f.newID("metric"), Type: body.Type, Name: body.Name, Params: body.Params}
+	f.metrics[m.ID] = m
+	writeJSON(w, http.StatusCreated, f.metricJSON(m))
+}
+
+func (f *FakeAPI) readMetric(w http.ResponseWriter, id string) {
+	m, ok := f.metrics[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	writeJSON(w, http.StatusOK, f.metricJSON(m))
+}
+
+func (f *FakeAPI) updateMetric(w http.ResponseWriter, r *http.Request, id string) {
+	m, ok := f.metrics[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	var body map[string]json.RawMessage
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	if raw, ok := body["name"]; ok {
+		var name string
+		_ = json.Unmarshal(raw, &name)
+		if f.metricNameTaken(name, id) {
+			writeError(w, http.StatusConflict, "already_exists", "a metric of that name exists")
+			return
+		}
+		m.Name = name
+	}
+	if raw, ok := body["params"]; ok {
+		var params map[string]interface{}
+		_ = json.Unmarshal(raw, &params)
+		m.Params = params
+	}
+	writeJSON(w, http.StatusOK, f.metricJSON(m))
+}
+
+func (f *FakeAPI) deleteMetric(w http.ResponseWriter, id string) {
+	if _, ok := f.metrics[id]; !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	delete(f.metrics, id)
+	for _, s := range f.streams {
+		delete(s.Metrics, id)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (f *FakeAPI) streamMetricJSON(s *fakeStream, m *fakeMetric) map[string]interface{} {
+	params := s.Metrics[m.ID]
+	return map[string]interface{}{
+		"metric": m.ID, "stream": s.ID, "params": nonNil(params),
+		"effective": layered(metricType(m.Type).Defaults, m.Params, params),
+	}
+}
+
+func (f *FakeAPI) createStreamMetric(w http.ResponseWriter, r *http.Request, streamID string) {
+	s, ok := f.streams[streamID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream")
+		return
+	}
+	var body struct {
+		MetricID string `json:"metric_id"`
+		Params   map[string]interface{}
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	m, ok := f.metrics[body.MetricID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such metric")
+		return
+	}
+	if _, exists := s.Metrics[m.ID]; exists {
+		writeError(w, http.StatusConflict, "already_exists", "that metric is already set on this stream")
+		return
+	}
+	if s.Metrics == nil {
+		s.Metrics = map[string]map[string]interface{}{}
+	}
+	s.Metrics[m.ID] = nonNil(body.Params)
+	writeJSON(w, http.StatusCreated, f.streamMetricJSON(s, m))
+}
+
+// streamMetric serves GET, PUT and DELETE of one row: a missing stream,
+// metric or row is the same 404.
+func (f *FakeAPI) streamMetric(w http.ResponseWriter, r *http.Request, streamID, metricID string) {
+	s, ok := f.streams[streamID]
+	m, mok := f.metrics[metricID]
+	if !ok || !mok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream or metric")
+		return
+	}
+	if _, exists := s.Metrics[metricID]; !exists {
+		writeError(w, http.StatusNotFound, "not_found", m.Name+" is not set on this stream")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, f.streamMetricJSON(s, m))
+	case http.MethodPut:
+		var body struct{ Params map[string]interface{} }
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		s.Metrics[metricID] = nonNil(body.Params)
+		writeJSON(w, http.StatusOK, f.streamMetricJSON(s, m))
+	case http.MethodDelete:
+		delete(s.Metrics, metricID)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
+	}
+}
+
+func (f *FakeAPI) listMetricTypes(w http.ResponseWriter) {
+	out := make([]map[string]interface{}, len(fakeMetricTypes))
+	for i, t := range fakeMetricTypes {
+		out[i] = map[string]interface{}{
+			"key": t.Key, "presentation": t.Presentation, "defaults": t.Defaults,
+			"required": t.Required, "per_stream": t.PerStream,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// DeclareCharts writes a stream's chart list directly — charts declared
+// outside Terraform. Each chart is its wire shape: title, series, markers.
+func (f *FakeAPI) DeclareCharts(streamID string, charts []map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		s.Charts = charts
+	}
+}
+
+// ChartCount is how many charts a stream has declared.
+func (f *FakeAPI) ChartCount(streamID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		return len(s.Charts)
+	}
+	return -1
+}
+
+// checkChart is the one chart rule a plan meets: every entry names a series
+// of this stream.
+func checkChart(s *fakeStream, chart map[string]interface{}) string {
+	for _, list := range []string{"series", "markers"} {
+		entries, _ := chart[list].([]interface{})
+		for _, e := range entries {
+			id, _ := e.(map[string]interface{})["id"].(string)
+			if !s.hasSeries(id) {
+				return "no series " + id + " on this stream"
+			}
+		}
+	}
+	return ""
+}
+
+func (s *fakeStream) hasSeries(id string) bool {
+	for _, sr := range s.Series {
+		if sr.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// declaredList serves GET and PUT of one of a stream's replace-whole lists
+// (sections, panels): entries stored exactly as given, fresh ids on every
+// PUT, and an optional check that refuses an entry with a 400.
+func (f *FakeAPI) declaredList(
+	w http.ResponseWriter, r *http.Request, streamID, key string,
+	list func(*fakeStream) *[]map[string]interface{}, check func(*fakeStream, map[string]interface{}) string,
+) {
+	s, ok := f.streams[streamID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such stream")
+		return
+	}
+	held := list(s)
+	if r.Method == http.MethodPut {
+		var body map[string][]map[string]interface{}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		for _, entry := range body[key] {
+			if check != nil {
+				if refusal := check(s, entry); refusal != "" {
+					writeError(w, http.StatusBadRequest, "payload_refused", refusal)
+					return
+				}
+			}
+			entry["id"] = f.newID(key)
+		}
+		*held = body[key]
+	} else if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
+		return
+	}
+	out := *held
+	if out == nil {
+		out = []map[string]interface{}{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{key: out})
+}
+
+// DeclareSections writes a stream's sections directly — declared outside Terraform.
+func (f *FakeAPI) DeclareSections(streamID string, sections []map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		s.Sections = sections
+	}
+}
+
+// checkPanel is the one panel rule a plan meets: dt is datagecko's to fill.
+func checkPanel(_ *fakeStream, panel map[string]interface{}) string {
+	parameters, _ := panel["parameters"].(map[string]interface{})
+	if _, has := parameters["dt"]; has {
+		return "panel parameters may not carry dt; datagecko fills it"
+	}
+	if parameters == nil {
+		panel["parameters"] = map[string]interface{}{}
+	}
+	return ""
+}
+
+// DeclarePanels writes a stream's panels directly — declared outside Terraform.
+func (f *FakeAPI) DeclarePanels(streamID string, panels []map[string]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[streamID]; ok {
+		s.Panels = panels
+	}
+}
+
+type fakeAction struct {
+	ID, Name, Description, RequestRole string
+	ParametersSchema                   map[string]interface{}
+	ExpiresAfter, ResultMaxBytes       int64
+	RunInFlight                        bool
+}
+
+// The API's defaults for a field a body leaves out, and its one cap a plan meets.
+const (
+	fakeExpiresAfterDefault   = 10
+	fakeExpiresAfterCap       = 3600
+	fakeResultMaxBytesDefault = 1048576
+)
+
+func (a *fakeAction) json() map[string]interface{} {
+	return map[string]interface{}{
+		"id": a.ID, "name": a.Name, "description": a.Description,
+		"parameters_schema": nonNil(a.ParametersSchema), "expires_after": a.ExpiresAfter,
+		"result_max_bytes": a.ResultMaxBytes, "request_role": a.RequestRole,
+	}
+}
+
+// SetRunInFlight marks an action as having a run in flight, so a delete is refused.
+func (f *FakeAPI) SetRunInFlight(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.actions[name]; ok {
+		a.RunInFlight = true
+	}
+}
+
+func (f *FakeAPI) listActions(w http.ResponseWriter) {
+	out := make([]map[string]interface{}, 0, len(f.actions))
+	for _, a := range f.actions {
+		out = append(out, a.json())
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"actions": out})
+}
+
+// writeAction is a create (POST, name in the body) or a whole replace (PUT,
+// name in the path): every field left out takes its default either way.
+func (f *FakeAPI) writeAction(w http.ResponseWriter, r *http.Request, name string, create bool) {
+	var body struct {
+		Name             string
+		Description      string
+		ParametersSchema map[string]interface{} `json:"parameters_schema"`
+		ExpiresAfter     *int64                 `json:"expires_after"`
+		ResultMaxBytes   *int64                 `json:"result_max_bytes"`
+		RequestRole      string                 `json:"request_role"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+		return
+	}
+	existing, exists := f.actions[name]
+	if create {
+		name = body.Name
+		if _, taken := f.actions[name]; taken {
+			writeError(w, http.StatusConflict, "conflict", "an action of that name exists; PUT /actions/{name} replaces it")
+			return
+		}
+	} else if !exists {
+		writeError(w, http.StatusNotFound, "not_found", "no such action")
+		return
+	}
+	a := &fakeAction{
+		Name: name, Description: body.Description, ParametersSchema: body.ParametersSchema,
+		ExpiresAfter: fakeExpiresAfterDefault, ResultMaxBytes: fakeResultMaxBytesDefault, RequestRole: "member",
+	}
+	if body.ExpiresAfter != nil {
+		if *body.ExpiresAfter > fakeExpiresAfterCap {
+			writeError(w, http.StatusBadRequest, "payload_refused", fmt.Sprintf("expires_after must be at most %d", fakeExpiresAfterCap))
+			return
+		}
+		a.ExpiresAfter = *body.ExpiresAfter
+	}
+	if body.ResultMaxBytes != nil {
+		a.ResultMaxBytes = *body.ResultMaxBytes
+	}
+	if body.RequestRole != "" {
+		a.RequestRole = body.RequestRole
+	}
+	status := http.StatusOK
+	if create {
+		a.ID = f.newID("action")
+		status = http.StatusCreated
+	} else {
+		a.ID, a.RunInFlight = existing.ID, existing.RunInFlight
+	}
+	f.actions[name] = a
+	writeJSON(w, status, a.json())
+}
+
+func (f *FakeAPI) deleteAction(w http.ResponseWriter, name string) {
+	a, ok := f.actions[name]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such action")
+		return
+	}
+	if a.RunInFlight {
+		writeError(w, http.StatusConflict, "conflict", "the action has runs in flight; cancel them or wait")
+		return
+	}
+	delete(f.actions, name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ClearRunsInFlight ends every action's runs — they finished.
+func (f *FakeAPI) ClearRunsInFlight() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.actions {
+		a.RunInFlight = false
+	}
+}
+
+func (f *FakeAPI) listRunners(w http.ResponseWriter) {
+	out := make([]map[string]interface{}, 0, len(f.keys))
+	for _, k := range f.keys {
+		if k.Revoked || k.Role != "ingest" {
+			continue
+		}
+		var hook interface{}
+		if k.Hook != nil {
+			hook = map[string]interface{}{"url": k.Hook.URL, "last_ring_at": nil, "last_ring_status": ""}
+		}
+		out = append(out, map[string]interface{}{
+			"prefix": k.Prefix, "name": k.Name, "last_claim_at": nil, "in_flight": 0, "hook": hook,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"runners": out})
+}
+
+// hook serves POST (set once), PUT (replace, new secret) and DELETE of a
+// key's hook. The secret is shown in the response and nowhere else.
+func (f *FakeAPI) hook(w http.ResponseWriter, r *http.Request, prefix string) {
+	k, ok := f.keys[prefix]
+	if !ok || k.Revoked {
+		writeError(w, http.StatusNotFound, "not_found", "no such key")
+		return
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPut:
+		var body struct{ URL string }
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "payload_refused", err.Error())
+			return
+		}
+		if !strings.HasPrefix(body.URL, "https://") {
+			writeError(w, http.StatusBadRequest, "payload_refused", "hook url must be https")
+			return
+		}
+		status := http.StatusOK
+		if r.Method == http.MethodPost {
+			if k.Hook != nil {
+				writeError(w, http.StatusConflict, "conflict", "this key has a hook; PUT replaces it")
+				return
+			}
+			status = http.StatusCreated
+		} else if k.Hook == nil {
+			writeError(w, http.StatusNotFound, "not_found", "this key has no hook")
+			return
+		}
+		k.Hook = &fakeHook{URL: body.URL, Secret: f.newID(prefix + ".hook")}
+		writeJSON(w, status, map[string]string{"url": k.Hook.URL, "secret": k.Hook.Secret})
+	case http.MethodDelete:
+		if k.Hook == nil {
+			writeError(w, http.StatusNotFound, "not_found", "this key has no hook")
+			return
+		}
+		k.Hook = nil
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", r.Method)
+	}
 }

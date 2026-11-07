@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/funktionswerk/terraform-provider-datagecko/internal/provider/testutil"
@@ -121,30 +123,30 @@ func TestDeleteStreamNotFound(t *testing.T) {
 	}
 }
 
-func TestClientRetriesOnceOn429(t *testing.T) {
+func TestClientRetriesUpToThreeTimesOn429(t *testing.T) {
 	fake := testutil.NewFakeAPI()
 	defer fake.Close()
-	fake.RateLimitNextRequests(1)
+	fake.RateLimitNextRequests(3)
 	client := NewClient(fake.Server.URL, "test", nil)
 
 	_, err := client.CreateStream(context.Background(), "revenue", "", nil)
 
 	if err != nil {
-		t.Fatalf("expected the retry to succeed, got %v", err)
+		t.Fatalf("expected the third retry to succeed, got %v", err)
 	}
 }
 
-func TestClientGivesUpAfterOneRetry(t *testing.T) {
+func TestClientGivesUpAfterThreeRetries(t *testing.T) {
 	fake := testutil.NewFakeAPI()
 	defer fake.Close()
-	fake.RateLimitNextRequests(2)
+	fake.RateLimitNextRequests(4)
 	client := NewClient(fake.Server.URL, "test", nil)
 
 	_, err := client.CreateStream(context.Background(), "revenue", "", nil)
 
 	apiErr, ok := err.(*APIError)
 	if !ok || apiErr.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("expected a 429 APIError after the one retry, got %v", err)
+		t.Fatalf("expected a 429 APIError after three retries, got %v", err)
 	}
 }
 
@@ -174,12 +176,12 @@ func TestSeriesAndKeyLifecycleAgainstTheFake(t *testing.T) {
 	ctx := context.Background()
 
 	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
-	series, err := client.CreateSeries(ctx, stream.ID, "delivery", "USD")
+	series, err := client.CreateSeries(ctx, stream.ID, "delivery", "USD", "", nil)
 	if err != nil {
 		t.Fatalf("CreateSeries: %v", err)
 	}
 	newName := "delivered"
-	if _, err := client.UpdateSeries(ctx, stream.ID, series.ID, &newName, nil); err != nil {
+	if _, err := client.UpdateSeries(ctx, stream.ID, series.ID, &newName, nil, nil); err != nil {
 		t.Fatalf("UpdateSeries: %v", err)
 	}
 	if err := client.DeleteSeries(ctx, stream.ID, series.ID); err != nil {
@@ -205,5 +207,285 @@ func TestSeriesAndKeyLifecycleAgainstTheFake(t *testing.T) {
 	}
 	if found != nil {
 		t.Fatalf("expected a revoked key to be findable-none, got %+v", found)
+	}
+}
+
+func TestSeriesKindAndIntervalRoundTrip(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	seven := int64(7)
+
+	series, err := client.CreateSeries(ctx, stream.ID, "deployed", "", "marker", &seven)
+	if err != nil {
+		t.Fatalf("CreateSeries: %v", err)
+	}
+	if series.Kind != "marker" || series.IntervalDays == nil || *series.IntervalDays != 7 {
+		t.Fatalf("expected kind marker and interval 7 back, got %+v", series)
+	}
+
+	cleared, err := client.UpdateSeries(ctx, stream.ID, series.ID, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("UpdateSeries: %v", err)
+	}
+	if cleared.IntervalDays != nil {
+		t.Fatalf("expected a null interval_days to clear the cadence, got %v", *cleared.IntervalDays)
+	}
+	if cleared.Kind != "marker" {
+		t.Fatalf("expected the kind to be untouched by a PATCH, got %q", cleared.Kind)
+	}
+}
+
+func TestMetricLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+
+	created, err := client.CreateMetric(ctx, "freshness", "Freshness", json.RawMessage(`{"warning_after": 3}`))
+	if err != nil {
+		t.Fatalf("CreateMetric: %v", err)
+	}
+	if string(created.Effective) != `{"critical_after":7,"warning_after":3}` {
+		t.Fatalf("expected defaults under params, got %s", created.Effective)
+	}
+
+	_, err = client.CreateMetric(ctx, "freshness", "FRESHNESS", nil)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a case-insensitive name conflict, got %v", err)
+	}
+
+	updated, err := client.UpdateMetric(ctx, created.ID, "Fresh", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("UpdateMetric: %v", err)
+	}
+	if updated.Name != "Fresh" || string(updated.Params) != `{}` {
+		t.Fatalf("expected the rename and params replaced whole, got %+v", updated)
+	}
+	if err := client.DeleteMetric(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteMetric: %v", err)
+	}
+	_, err = client.GetMetric(ctx, created.ID)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected not found after delete, got %v", err)
+	}
+}
+
+func TestStreamMetricLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	series, _ := client.CreateSeries(ctx, stream.ID, "delivery", "", "", nil)
+	coverage, _ := client.CreateMetric(ctx, "coverage", "Coverage", nil)
+
+	row, err := client.CreateStreamMetric(ctx, stream.ID, coverage.ID, json.RawMessage(`{"target": "`+series.ID+`"}`))
+	if err != nil {
+		t.Fatalf("CreateStreamMetric: %v", err)
+	}
+	want := `{"critical_after":3,"markers":[],"target":"` + series.ID + `","warning_after":1,"window_days":30}`
+	if string(row.Effective) != want {
+		t.Fatalf("expected defaults, instance, row layered, got %s", row.Effective)
+	}
+
+	_, err = client.CreateStreamMetric(ctx, stream.ID, coverage.ID, nil)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a second create to conflict, got %v", err)
+	}
+
+	replaced, err := client.ReplaceStreamMetric(ctx, stream.ID, coverage.ID, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("ReplaceStreamMetric: %v", err)
+	}
+	if string(replaced.Params) != `{}` {
+		t.Fatalf("expected params replaced whole, got %s", replaced.Params)
+	}
+
+	_, err = client.ReplaceStreamMetric(ctx, stream.ID, "metric-unknown", json.RawMessage(`{}`))
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected a replace of a missing row to be a 404, got %v", err)
+	}
+
+	if err := client.DeleteStreamMetric(ctx, stream.ID, coverage.ID); err != nil {
+		t.Fatalf("DeleteStreamMetric: %v", err)
+	}
+	_, err = client.GetStreamMetric(ctx, stream.ID, coverage.ID)
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected not found after delete, got %v", err)
+	}
+}
+
+func TestChartsRoundTripOnlySetStyles(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	delivery, _ := client.CreateSeries(ctx, stream.ID, "delivery", "", "", nil)
+	baseline, _ := client.CreateSeries(ctx, stream.ID, "baseline", "", "", nil)
+	other, _ := client.CreateStream(ctx, "orders", "", nil)
+	foreign, _ := client.CreateSeries(ctx, other.ID, "count", "", "", nil)
+	width, color := 2.5, "#f59e0b"
+
+	_, err := client.ReplaceCharts(ctx, stream.ID, []Chart{{
+		Title:  "Delivery vs baseline",
+		Series: []ChartEntry{{ID: delivery.ID, Width: &width, Color: &color}, {ID: baseline.ID}},
+	}})
+	if err != nil {
+		t.Fatalf("ReplaceCharts: %v", err)
+	}
+	charts, err := client.GetCharts(ctx, stream.ID)
+	if err != nil {
+		t.Fatalf("GetCharts: %v", err)
+	}
+	if len(charts) != 1 || charts[0].Series[0].Width == nil || *charts[0].Series[0].Width != 2.5 {
+		t.Fatalf("expected the set width back, got %+v", charts)
+	}
+	if bare := charts[0].Series[1]; bare.Width != nil || bare.Color != nil {
+		t.Fatalf("expected an unset style to stay absent, got %+v", bare)
+	}
+
+	_, err = client.ReplaceCharts(ctx, stream.ID, []Chart{{Series: []ChartEntry{{ID: foreign.ID}}}})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, "no series") {
+		t.Fatalf("expected the server to refuse a foreign series, got %v", err)
+	}
+}
+
+func TestSectionsKeepTheBodyExactly(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+	body := "line one\n\nline two\n"
+
+	if _, err := client.ReplaceSections(ctx, stream.ID, []Section{{Title: "About", Body: body}}); err != nil {
+		t.Fatalf("ReplaceSections: %v", err)
+	}
+	sections, err := client.GetSections(ctx, stream.ID)
+	if err != nil {
+		t.Fatalf("GetSections: %v", err)
+	}
+	if len(sections) != 1 || sections[0].Body != body {
+		t.Fatalf("expected the body back byte for byte, got %+v", sections)
+	}
+}
+
+func TestQueryPanelsRefuseDt(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	stream, _ := client.CreateStream(ctx, "revenue", "", nil)
+
+	_, err := client.ReplaceQueryPanels(ctx, stream.ID, []QueryPanel{{Title: "Day", Action: "rows", Parameters: json.RawMessage(`{"dt": "x"}`)}})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, "dt") {
+		t.Fatalf("expected the server to refuse dt, got %v", err)
+	}
+
+	if _, err := client.ReplaceQueryPanels(ctx, stream.ID, []QueryPanel{{Title: "Top", Action: "rows", Parameters: json.RawMessage(`{"rows": 10}`)}}); err != nil {
+		t.Fatalf("ReplaceQueryPanels: %v", err)
+	}
+	panels, err := client.GetQueryPanels(ctx, stream.ID)
+	if err != nil {
+		t.Fatalf("GetQueryPanels: %v", err)
+	}
+	if len(panels) != 1 || string(panels[0].Parameters) != `{"rows":10}` {
+		t.Fatalf("expected the panel back, got %+v", panels)
+	}
+}
+
+func TestActionLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+
+	created, err := client.CreateAction(ctx, "rows", ActionInput{ParametersSchema: json.RawMessage(`{"properties":{"dt":{"type":"string"}}}`)})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	if created.ExpiresAfter != 10 || created.RequestRole != "member" || created.ResultMaxBytes != 1048576 {
+		t.Fatalf("expected the server's defaults, got %+v", created)
+	}
+
+	_, err = client.CreateAction(ctx, "rows", ActionInput{})
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected an existing name to conflict, got %v", err)
+	}
+
+	minutes := int64(120)
+	replaced, err := client.ReplaceAction(ctx, "rows", ActionInput{ExpiresAfter: &minutes})
+	if err != nil {
+		t.Fatalf("ReplaceAction: %v", err)
+	}
+	if replaced.ExpiresAfter != 120 || string(replaced.ParametersSchema) != `{}` {
+		t.Fatalf("expected a whole replace (omitted schema reset), got %+v", replaced)
+	}
+
+	_, err = client.ReplaceAction(ctx, "nope", ActionInput{})
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsNotFound() {
+		t.Fatalf("expected a replace of a missing action to be a 404, got %v", err)
+	}
+
+	hours := int64(7200)
+	_, err = client.CreateAction(ctx, "slow", ActionInput{ExpiresAfter: &hours})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, "3600") {
+		t.Fatalf("expected the cap refused by name, got %v", err)
+	}
+
+	fake.SetRunInFlight("rows")
+	err = client.DeleteAction(ctx, "rows")
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a delete with a run in flight to be a 409, got %v", err)
+	}
+}
+
+func TestHookLifecycleAgainstTheFake(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	client := NewClient(fake.Server.URL, "test", nil)
+	ctx := context.Background()
+	key, _ := client.CreateIngestKey(ctx, "runner")
+	other, _ := client.CreateIngestKey(ctx, "other")
+
+	set, err := client.CreateHook(ctx, key.Prefix, "https://runner.example/ring")
+	if err != nil || set.Secret == "" {
+		t.Fatalf("CreateHook: expected a secret, got %+v, %v", set, err)
+	}
+	_, err = client.CreateHook(ctx, key.Prefix, "https://runner.example/ring")
+	if apiErr, ok := err.(*APIError); !ok || !apiErr.IsAlreadyExists() {
+		t.Fatalf("expected a second hook to conflict, got %v", err)
+	}
+
+	rotated, err := client.ReplaceHook(ctx, key.Prefix, "https://runner.example/v2")
+	if err != nil {
+		t.Fatalf("ReplaceHook: %v", err)
+	}
+	if rotated.Secret == set.Secret {
+		t.Fatal("expected a replace to rotate the secret")
+	}
+	runner, err := client.FindRunner(ctx, key.Prefix)
+	if err != nil || runner == nil || runner.Hook == nil || runner.Hook.URL != "https://runner.example/v2" {
+		t.Fatalf("expected the runner to show the new url, got %+v, %v", runner, err)
+	}
+
+	_, err = client.CreateHook(ctx, other.Prefix, "http://runner.example/ring")
+	if apiErr, ok := err.(*APIError); !ok || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected an http url refused, got %v", err)
+	}
+
+	if err := client.DeleteHook(ctx, key.Prefix); err != nil {
+		t.Fatalf("DeleteHook: %v", err)
+	}
+	runner, _ = client.FindRunner(ctx, key.Prefix)
+	if runner == nil || runner.Hook != nil {
+		t.Fatalf("expected the hook gone and the runner kept, got %+v", runner)
 	}
 }

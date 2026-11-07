@@ -1,6 +1,10 @@
 # terraform-provider-datagecko
 
-Manages [datagecko](https://datagecko.ai) streams, series, and ingest keys for one organization, authenticated by that organization's admin key.
+Manages [datagecko](https://datagecko.ai) streams, series, metrics and their stream rows, charts, sections, query panels, actions, runner hooks and ingest keys for one organization, authenticated by that organization's admin key.
+
+Declare one `datagecko_stream_charts`, `datagecko_stream_sections` or `datagecko_stream_query_panels` per stream: each replaces its list whole, so two on one stream overwrite each other on every apply.
+
+JSON attributes (`params`, `parameters`, `parameters_schema`) are compared as JSON values, so key order and whitespace never show as a diff; write them with `jsonencode()`.
 
 ## Building and installing locally
 

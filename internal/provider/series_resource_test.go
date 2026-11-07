@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 
 	"github.com/funktionswerk/terraform-provider-datagecko/internal/provider/testutil"
 )
@@ -66,13 +66,7 @@ resource "datagecko_series" "delivery" {
 				ResourceName:      "datagecko_series.delivery",
 				ImportState:       true,
 				ImportStateVerify: true,
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					rs, ok := s.RootModule().Resources["datagecko_series.delivery"]
-					if !ok {
-						return "", fmt.Errorf("resource not found in state")
-					}
-					return rs.Primary.Attributes["stream_id"] + "/" + rs.Primary.Attributes["id"], nil
-				},
+				ImportStateIdFunc: seriesImportID("datagecko_series.delivery"),
 			},
 		},
 	})
@@ -113,6 +107,88 @@ resource "datagecko_series" "delivery" {
 				Config:             config,
 				PlanOnly:           true,
 				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
+func TestAccSeriesResource_kindAndInterval(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	withInterval := providerBlock(fake.Server.URL) + `
+resource "datagecko_stream" "revenue" { name = "revenue" }
+
+resource "datagecko_series" "deployed" {
+  stream_id     = datagecko_stream.revenue.id
+  name          = "deployed"
+  kind          = "marker"
+  interval_days = 7
+}
+`
+	withoutInterval := providerBlock(fake.Server.URL) + `
+resource "datagecko_stream" "revenue" { name = "revenue" }
+
+resource "datagecko_series" "deployed" {
+  stream_id = datagecko_stream.revenue.id
+  name      = "deployed"
+  kind      = "marker"
+}
+`
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6Factories(),
+		Steps: []resource.TestStep{
+			{
+				Config: withInterval,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("datagecko_series.deployed", "kind", "marker"),
+					resource.TestCheckResourceAttr("datagecko_series.deployed", "interval_days", "7"),
+				),
+			},
+			{
+				// Dropping the cadence is an in-place PATCH {"interval_days": null}, not a replace.
+				Config: withoutInterval,
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction("datagecko_series.deployed", plancheck.ResourceActionUpdate),
+				}},
+				Check: resource.TestCheckNoResourceAttr("datagecko_series.deployed", "interval_days"),
+			},
+			{
+				ResourceName:      "datagecko_series.deployed",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: seriesImportID("datagecko_series.deployed"),
+			},
+		},
+	})
+}
+
+func TestAccSeriesResource_kindDefaultsToMeasureAndAChangeReplaces(t *testing.T) {
+	fake := testutil.NewFakeAPI()
+	defer fake.Close()
+	measure := providerBlock(fake.Server.URL) + `
+resource "datagecko_stream" "revenue" { name = "revenue" }
+resource "datagecko_series" "delivery" {
+  stream_id = datagecko_stream.revenue.id
+  name      = "delivery"
+}
+`
+	marker := providerBlock(fake.Server.URL) + `
+resource "datagecko_stream" "revenue" { name = "revenue" }
+resource "datagecko_series" "delivery" {
+  stream_id = datagecko_stream.revenue.id
+  name      = "delivery"
+  kind      = "marker"
+}
+`
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6Factories(),
+		Steps: []resource.TestStep{
+			{Config: measure, Check: resource.TestCheckResourceAttr("datagecko_series.delivery", "kind", "measure")},
+			{
+				Config: marker,
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction("datagecko_series.delivery", plancheck.ResourceActionReplace),
+				}},
 			},
 		},
 	})
