@@ -1,7 +1,8 @@
 terraform {
   required_providers {
     datagecko = {
-      source = "registry.terraform.io/funktionswerk/datagecko"
+      source  = "funktionswerk/datagecko"
+      version = "~> 0.1"
     }
   }
 }

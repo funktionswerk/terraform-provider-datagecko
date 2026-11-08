@@ -9,6 +9,8 @@ import (
 	"github.com/funktionswerk/terraform-provider-datagecko/internal/provider"
 )
 
+//go:generate go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@v0.25.0 generate --provider-name datagecko
+
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
