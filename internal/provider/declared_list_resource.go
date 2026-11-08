@@ -54,6 +54,7 @@ func (r *listResource[W, M]) Schema(ctx context.Context, req resource.SchemaRequ
 			},
 			"stream_id": schema.StringAttribute{
 				Required:      true,
+				Description:   "The stream whose list this is. A change replaces the resource.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 		},
